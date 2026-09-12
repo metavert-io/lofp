@@ -7,23 +7,37 @@ import (
 	"sync"
 	"time"
 
+	"go.mongodb.org/mongo-driver/v2/bson"
+
 	"github.com/jonradoff/lofp/internal/gameworld"
 )
 
 // MonsterInstance represents a spawned monster in the world.
 type MonsterInstance struct {
-	ID           int       `json:"id"`
-	DefNumber    int       `json:"defNumber"`
-	RoomNumber   int       `json:"roomNumber"`
-	Alive        bool      `json:"alive"`
-	Sedated      bool      `json:"sedated"`
-	Stunned      bool      `json:"-"` // stunned: skip next combat tick, easier to hit
-	Skinned      bool      `json:"-"` // already skinned
-	DefenseBonus int       `json:"-"` // from active psi defenses
-	CurrentHP  int       `json:"currentHP"`
-	Target     string    `json:"-"`
-	Searched   bool      `json:"-"` // already searched for loot
-	DeathTime  time.Time `json:"-"` // when it died (for corpse decay)
+	ID             int                   `json:"id"`
+	DefNumber      int                   `json:"defNumber"`
+	RoomNumber     int                   `json:"roomNumber"`
+	Alive          bool                  `json:"alive"`
+	Sedated        bool                  `json:"sedated"`
+	Stunned        bool                  `json:"-"` // stunned: skip next combat tick, easier to hit
+	Skinned        bool                  `json:"-"` // already skinned
+	DefenseBonus   int                   `json:"-"` // from active psi defenses
+	CurrentHP      int                   `json:"currentHP"`
+	Target         string                `json:"-"`
+	Searched       bool                  `json:"-"` // already searched for loot
+	DeathTime      time.Time             `json:"-"` // when it died (for corpse decay)
+	DamageByPlayer map[bson.ObjectID]int `json:"-"` // tracks damage dealt by players for loot distribution
+
+	CommanderID     string `json:"-"` //player NAME of the summoner/controller (if any)
+	ControlType     string `json:"-"` // "SUMMONED" or "CONTROLLED" for player-controlled monsters
+	Following       string `json:"-"` //is following a player (for summoned monsters)
+	TargetMonsterID int    `json:"-"` //track controlled monster target // -1 means no monster target
+	Guarding        string `json:"-"` //creature guarding a player (for summoned monsters)
+	Watching        bool   `json:"-"` //creature is watching wich broadcasts the room back to the player on move
+
+	PreparedSpell int
+	SpellReadyAt  time.Time
+	Mana          int
 }
 
 // monsterManager handles monster spawning and tracking.
@@ -31,7 +45,7 @@ type monsterManager struct {
 	mu             sync.RWMutex
 	instances      []MonsterInstance
 	nextID         int
-	monstersByRoom map[int][]int    // roomNumber -> slice of instance indices
+	monstersByRoom map[int][]int     // roomNumber -> slice of instance indices
 	roomLastPlayer map[int]time.Time // roomNumber -> last time a player was present
 }
 
@@ -130,12 +144,14 @@ func (e *GameEngine) spawnForRoom(roomNum int) {
 				hp += rand.Intn(def.ExtraBody/2+1) + def.ExtraBody/2
 			}
 			inst := MonsterInstance{
-				ID:           e.monsterMgr.nextID,
-				DefNumber:    ml.MonsterID,
-				RoomNumber:   roomNum,
-				Alive:        true,
-				CurrentHP:    hp,
-				DefenseBonus: monsterPsiDefenseBonus(def.Disciplines),
+				ID:              e.monsterMgr.nextID,
+				DefNumber:       ml.MonsterID,
+				RoomNumber:      roomNum,
+				Alive:           true,
+				CurrentHP:       hp,
+				DefenseBonus:    monsterPsiDefenseBonus(def.Disciplines),
+				TargetMonsterID: -1, // no monster target by default
+				Mana:            def.Mana,
 			}
 			idx := len(e.monsterMgr.instances)
 			e.monsterMgr.instances = append(e.monsterMgr.instances, inst)
@@ -159,14 +175,26 @@ func (e *GameEngine) spawnForRoom(roomNum int) {
 }
 
 // SpawnOne creates a single monster instance in a room. hp should include ExtraBody.
-func (mm *monsterManager) SpawnOne(defNum, roomNum, hp int) {
+func (mm *monsterManager) SpawnOne(defNum, roomNum, hp int, mana int) *MonsterInstance {
 	mm.mu.Lock()
 	defer mm.mu.Unlock()
-	inst := MonsterInstance{ID: mm.nextID, DefNumber: defNum, RoomNumber: roomNum, Alive: true, CurrentHP: hp}
+
+	inst := MonsterInstance{
+		ID:              mm.nextID,
+		DefNumber:       defNum,
+		RoomNumber:      roomNum,
+		Alive:           true,
+		CurrentHP:       hp,
+		TargetMonsterID: -1, // no monster target by default
+		Mana:            mana,
+	}
+
 	idx := len(mm.instances)
 	mm.instances = append(mm.instances, inst)
 	mm.monstersByRoom[roomNum] = append(mm.monstersByRoom[roomNum], idx)
 	mm.nextID++
+
+	return &mm.instances[idx]
 }
 
 // lastSpawnedID returns the ID of the most recently spawned monster.
@@ -231,6 +259,26 @@ func (mm *monsterManager) AllMonstersInRoom(roomNum int) []MonsterInstance {
 		}
 	}
 	return result
+}
+
+func (mm *monsterManager) MarkSkinned(instanceID int) bool {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+
+	for i := range mm.instances {
+		if mm.instances[i].ID != instanceID {
+			continue
+		}
+
+		if mm.instances[i].Skinned {
+			return false
+		}
+
+		mm.instances[i].Skinned = true
+		return true
+	}
+
+	return false
 }
 
 // moveMonster moves a monster instance to a new room. Must be called under lock.
@@ -386,6 +434,12 @@ func (e *GameEngine) unloadDistantMonsters() {
 			continue
 		}
 
+		// Summoned creatures are controlled by their summoner
+		// and should not be removed by distant-room cleanup.
+		if inst.ControlType == "SUMMONED" {
+			continue
+		}
+
 		// Don't unload if players are in the room
 		if playerRooms[inst.RoomNumber] {
 			continue
@@ -457,6 +511,7 @@ func (e *GameEngine) monsterTick(tick int) {
 
 	for idx := range e.monsterMgr.instances {
 		inst := &e.monsterMgr.instances[idx]
+
 		if !inst.Alive || inst.Sedated {
 			continue
 		}
@@ -466,127 +521,477 @@ func (e *GameEngine) monsterTick(tick int) {
 			continue
 		}
 
-		// Speed determines action frequency: speed 1 = every tick, speed 3 (default) = every 3 ticks
+		// Commanded creatures do nothing autonomously unless they
+		// have been explicitly ordered to attack another monster.
+		if inst.CommanderID != "" &&
+			inst.TargetMonsterID < 0 {
+			continue
+		}
+
+		// Speed determines action frequency:
+		// speed 1 = every tick, speed 3 = every 3 ticks.
 		speed := def.Speed
 		if speed <= 0 {
 			speed = 3
 		}
+
 		if tick%speed != 0 {
 			continue
 		}
 
-		// If monster is in combat, process combat instead of wandering/texting
-		if inst.Target != "" {
+		// ------------------------------------------------------------
+		// COMBAT
+		//
+		// A monster may now be fighting either:
+		//   Target          = player
+		//   TargetMonsterID = monster
+		// ------------------------------------------------------------
+
+		if inst.Target != "" || inst.TargetMonsterID >= 0 {
 			e.monsterCombatTick(inst, def)
 			continue
 		}
 
 		name := FormatMonsterName(def, e.monAdjs)
 
-		// Hostile monsters without a target — look for players in room
-		if def.Strategy >= 301 && inst.Target == "" {
+		// ------------------------------------------------------------
+		// AUTONOMOUS AGGRO
+		//
+		// Only acquire a player if the monster has NO target at all.
+		// ------------------------------------------------------------
+
+		if def.Strategy >= 301 &&
+			inst.Target == "" &&
+			inst.TargetMonsterID < 0 {
+
 			if e.sessions != nil {
 				for _, p := range e.sessions.OnlinePlayers() {
-					if p.RoomNumber == inst.RoomNumber && !p.Dead && !p.Hidden && !p.GMInvis {
-						inst.Target = p.FirstName
-						if e.sendToPlayer != nil {
-							e.sendToPlayer(p.FirstName, []string{fmt.Sprintf("A %s snarls and attacks you!", name)})
-						}
-						break
+					if p.RoomNumber != inst.RoomNumber ||
+						p.Dead ||
+						p.Hidden ||
+						p.Invisible ||
+						p.GMInvis {
+						continue
 					}
+
+					inst.Target = p.FirstName
+
+					if e.sendToPlayer != nil {
+						e.sendToPlayer(
+							p.FirstName,
+							[]string{
+								fmt.Sprintf(
+									"A %s snarls and attacks you!",
+									name,
+								),
+							},
+						)
+					}
+
+					break
 				}
 			}
+
 			if inst.Target != "" {
-				continue // start combat next tick
+				continue // start combat next action tick
 			}
 		}
 
-		// Random text (TEX1-4): ~8% chance per action tick
+		// ------------------------------------------------------------
+		// RANDOM MONSTER TEXT
+		// ------------------------------------------------------------
+
 		if rand.Intn(100) < 8 {
 			var texts []string
-			for _, key := range []string{"TEX1", "TEX2", "TEX3", "TEX4"} {
+
+			for _, key := range []string{
+				"TEX1",
+				"TEX2",
+				"TEX3",
+				"TEX4",
+			} {
 				if t, ok := def.TextOverrides[key]; ok && t != "" {
 					texts = append(texts, t)
 				}
 			}
+
 			if len(texts) > 0 {
 				msg := texts[rand.Intn(len(texts))]
-				e.localRoomBroadcast(inst.RoomNumber, []string{msg})
+
+				e.localRoomBroadcast(
+					inst.RoomNumber,
+					[]string{msg},
+				)
 			}
 		}
 
-		// Wandering: ~5% chance per action tick for non-hostile, non-combat monsters
-		if def.Strategy < 301 && inst.Target == "" && rand.Intn(100) < 5 {
+		// ------------------------------------------------------------
+		// WANDERING
+		//
+		// Never wander while fighting either a player or monster.
+		// ------------------------------------------------------------
+
+		if def.Strategy < 301 &&
+			inst.Target == "" &&
+			inst.TargetMonsterID < 0 &&
+			rand.Intn(100) < 5 {
+
 			room := e.rooms[inst.RoomNumber]
 			if room == nil {
 				continue
 			}
 
-			// Collect valid exits
 			type exitInfo struct {
 				dir    string
 				destID int
 			}
+
 			var exits []exitInfo
+
 			for dir, destID := range room.Exits {
-				if destID > 0 {
-					// Non-flying monsters can't use ABOVE exits
-					if strings.EqualFold(dir, "ABOVE") || strings.EqualFold(dir, "UP") {
-						continue
-					}
-					exits = append(exits, exitInfo{dir, destID})
+				if destID <= 0 {
+					continue
 				}
+
+				// Non-flying monsters can't use vertical exits.
+				if strings.EqualFold(dir, "ABOVE") ||
+					strings.EqualFold(dir, "UP") {
+					continue
+				}
+
+				exits = append(
+					exits,
+					exitInfo{
+						dir:    dir,
+						destID: destID,
+					},
+				)
 			}
+
 			if len(exits) == 0 {
 				continue
 			}
 
-			// Pick a random exit
 			chosen := exits[rand.Intn(len(exits))]
-			destRoom := e.rooms[chosen.destID]
-			if destRoom == nil {
+
+			if !e.moveMonsterDirection(
+				idx,
+				inst,
+				def,
+				chosen.dir,
+			) {
 				continue
-			}
-
-			dirName := directionNames[chosen.dir]
-			if dirName == "" {
-				dirName = strings.ToLower(chosen.dir)
-			}
-
-			// Departure message
-			moveText := def.TextOverrides["TEXM"]
-			if moveText != "" {
-				e.localRoomBroadcast(inst.RoomNumber, []string{moveText + " " + dirName + "."})
-			} else {
-				article := "A"
-				if len(name) > 0 && strings.ContainsRune("aeiouAEIOU", rune(name[0])) {
-					article = "An"
-				}
-				if def.Unique {
-					e.localRoomBroadcast(inst.RoomNumber, []string{fmt.Sprintf("%s wanders %s.", name, dirName)})
-				} else {
-					e.localRoomBroadcast(inst.RoomNumber, []string{fmt.Sprintf("%s %s wanders %s.", article, name, dirName)})
-				}
-			}
-
-			// Move the monster
-			e.monsterMgr.moveMonster(idx, chosen.destID)
-
-			// Arrival message
-			entryText := def.TextOverrides["TEXE"]
-			if entryText != "" {
-				e.localRoomBroadcast(chosen.destID, []string{entryText})
-			} else {
-				article := "A"
-				if len(name) > 0 && strings.ContainsRune("aeiouAEIOU", rune(name[0])) {
-					article = "An"
-				}
-				if def.Unique {
-					e.localRoomBroadcast(chosen.destID, []string{fmt.Sprintf("%s has arrived.", name)})
-				} else {
-					e.localRoomBroadcast(chosen.destID, []string{fmt.Sprintf("%s %s has arrived.", article, name)})
-				}
 			}
 		}
 	}
+}
+
+func (e *GameEngine) chooseMonsterSpell(inst *MonsterInstance, def *gameworld.MonsterDef) *SpellDef {
+
+	if inst == nil || def == nil {
+		return nil
+	}
+
+	var choices []*SpellDef
+
+	for _, spellID := range def.Spells {
+		spell := FindSpellByID(spellID)
+		if spell == nil {
+			continue
+		}
+
+		// Monster cannot cast above its configured cast level.
+		if def.CastLevel > 0 && spell.Level > def.CastLevel {
+			continue
+		}
+
+		// Must currently have enough mana.
+		if inst.Mana < spell.ManaCost {
+			continue
+		}
+
+		// For now, only cast offensive damage spells.
+		// We can add monster versions of Fear, Charm, buffs, etc. next.
+		if spell.Effect != "damage" {
+			continue
+		}
+
+		choices = append(choices, spell)
+	}
+
+	if len(choices) == 0 {
+		return nil
+	}
+
+	return choices[rand.Intn(len(choices))]
+}
+
+func (e *GameEngine) beginMonsterSpell(inst *MonsterInstance, def *gameworld.MonsterDef, spell *SpellDef) string {
+
+	inst.PreparedSpell = spell.ID
+	inst.SpellReadyAt = time.Now().Add(
+		time.Duration(spell.CastTime) * time.Second,
+	)
+
+	name := FormatMonsterName(def, e.monAdjs)
+	article := articleFor(name, def.Unique)
+	monsterName := capArticle(article) + name
+
+	// TEXS appears to be the monster's preparation/incantation text.
+	if msg := def.TextOverrides["TEXS"]; msg != "" {
+		return msg
+	}
+
+	return fmt.Sprintf("%s incants a spell.", monsterName)
+}
+
+func (e *GameEngine) releaseMonsterSpell(inst *MonsterInstance, def *gameworld.MonsterDef, player *Player, spell *SpellDef) ([]string, []string) {
+
+	if inst == nil || def == nil || player == nil || spell == nil {
+		return nil, nil
+	}
+
+	name := FormatMonsterName(def, e.monAdjs)
+	article := articleFor(name, def.Unique)
+	monsterName := capArticle(article) + name
+
+	var playerMsgs []string
+	var roomMsgs []string
+
+	// If mana was drained while preparing, the spell cannot be released.
+	if inst.Mana < spell.ManaCost {
+		msg := fmt.Sprintf("%s's spell fades before it can be released.", monsterName)
+
+		roomMsgs = append(roomMsgs, msg)
+
+		return playerMsgs, roomMsgs
+	}
+
+	// Mana is spent on release, even if the casting roll fails.
+	inst.Mana -= spell.ManaCost
+
+	//playerMsgs = append(
+	//	playerMsgs,
+	//	fmt.Sprintf("%s gestures at %s.", monsterName, player.FirstName),
+	//)
+
+	//just room message it.
+	roomMsgs = append(
+		roomMsgs,
+		fmt.Sprintf("%s gestures at %s.", monsterName, player.FirstName),
+	)
+
+	// Monster spell skill appears to already be stored as a percentage.
+	castChance := def.SpellSkill
+
+	if castChance <= 0 {
+		castChance = 25
+	}
+
+	if castChance > 95 {
+		castChance = 95
+	}
+
+	roll := rand.Intn(100) + 1
+
+	if roll > castChance {
+		failMsg := def.TextOverrides["TEXQ"]
+
+		if failMsg == "" {
+			failMsg = fmt.Sprintf("%s's spell fizzles.", monsterName)
+		}
+
+		//	playerMsgs = append(playerMsgs, failMsg)
+		roomMsgs = append(roomMsgs, failMsg)
+
+		return playerMsgs, roomMsgs
+	}
+
+	// ------------------------------------------------------------
+	// DAMAGE SPELL
+	// ------------------------------------------------------------
+
+	if spell.Effect != "damage" {
+		return playerMsgs, roomMsgs
+	}
+
+	dmg := spell.DmgMin
+
+	if spell.DmgMax > spell.DmgMin {
+		dmg += rand.Intn(spell.DmgMax - spell.DmgMin + 1)
+	}
+
+	damageType := strings.ToUpper(spell.DmgType)
+
+	// Elemental resistance.
+	switch damageType {
+	case "HEAT", "FIRE", "BURN":
+		resistance := player.EffectiveStat(HeatResistance)
+
+		if resistance < 0 {
+			resistance = 0
+		}
+		if resistance > 100 {
+			resistance = 100
+		}
+
+		dmg = dmg * (100 - resistance) / 100
+
+	case "COLD", "ICE":
+		resistance := player.EffectiveStat(ColdResistance)
+
+		if resistance < 0 {
+			resistance = 0
+		}
+		if resistance > 100 {
+			resistance = 100
+		}
+
+		dmg = dmg * (100 - resistance) / 100
+	}
+
+	player.BodyPoints -= dmg
+
+	if player.BodyPoints < 0 {
+		player.BodyPoints = 0
+	}
+
+	part := randomBodyPart("HUMAN")
+	severity := damageSeverity(dmg)
+
+	damageNoun := "blast"
+
+	switch damageType {
+	case "HEAT", "FIRE", "BURN":
+		damageNoun = "burn"
+
+	case "COLD", "ICE":
+		damageNoun = "blast"
+
+	case "ELECTRIC", "LIGHTNING":
+		damageNoun = "shock"
+
+	case "CRUSHING":
+		damageNoun = "strike"
+	}
+
+	playerMsgs = append(
+		playerMsgs,
+		fmt.Sprintf(
+			"%s %s to %s. [%d Damage]",
+			severity,
+			damageNoun,
+			part,
+			dmg,
+		),
+	)
+
+	roomMsgs = append(
+		roomMsgs,
+		fmt.Sprintf(
+			"%s casts %s at %s.",
+			monsterName,
+			spell.Name,
+			player.FirstName,
+		),
+	)
+
+	if player.BodyPoints <= 0 {
+		if e.isArenaRoom(player.RoomNumber) {
+			player.BodyPoints = 1
+
+			playerMsgs = append(
+				playerMsgs,
+				"The arena's enchantment prevents your death!",
+			)
+		} else {
+
+			deathMsgs := e.handlePlayerDeath(player, name)
+			playerMsgs = append(playerMsgs, deathMsgs...)
+
+			roomMsgs = append(
+				roomMsgs,
+				fmt.Sprintf("%s slays %s!", monsterName, player.FirstName),
+			)
+		}
+	}
+
+	return playerMsgs, roomMsgs
+}
+
+func (e *GameEngine) moveMonsterDirection(idx int, inst *MonsterInstance, def *gameworld.MonsterDef, dir string) bool {
+	room := e.rooms[inst.RoomNumber]
+	if room == nil {
+		return false
+	}
+
+	destID, ok := room.Exits[dir]
+	if !ok || destID <= 0 {
+		return false
+	}
+
+	destRoom := e.rooms[destID]
+	if destRoom == nil {
+		return false
+	}
+
+	name := FormatMonsterName(def, e.monAdjs)
+
+	dirName := directionNames[dir]
+	if dirName == "" {
+		dirName = strings.ToLower(dir)
+	}
+
+	// Departure
+	moveText := def.TextOverrides["TEXM"]
+	if moveText != "" {
+		e.localRoomBroadcast(
+			inst.RoomNumber,
+			[]string{moveText + " " + dirName + "."},
+		)
+	} else {
+		article := "A"
+		if len(name) > 0 && strings.ContainsRune("aeiouAEIOU", rune(name[0])) {
+			article = "An"
+		}
+
+		if def.Unique {
+			e.localRoomBroadcast(
+				inst.RoomNumber,
+				[]string{fmt.Sprintf("%s wanders %s.", name, dirName)},
+			)
+		} else {
+			e.localRoomBroadcast(
+				inst.RoomNumber,
+				[]string{fmt.Sprintf("%s %s wanders %s.", article, name, dirName)},
+			)
+		}
+	}
+
+	e.monsterMgr.moveMonster(idx, destID)
+
+	// Arrival
+	entryText := def.TextOverrides["TEXE"]
+	if entryText != "" {
+		e.localRoomBroadcast(destID, []string{entryText})
+	} else {
+		article := "A"
+		if len(name) > 0 && strings.ContainsRune("aeiouAEIOU", rune(name[0])) {
+			article = "An"
+		}
+
+		if def.Unique {
+			e.localRoomBroadcast(
+				destID,
+				[]string{fmt.Sprintf("%s has arrived.", name)},
+			)
+		} else {
+			e.localRoomBroadcast(
+				destID,
+				[]string{fmt.Sprintf("%s %s has arrived.", article, name)},
+			)
+		}
+	}
+
+	return true
 }
