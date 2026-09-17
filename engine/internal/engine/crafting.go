@@ -63,7 +63,7 @@ func (e *GameEngine) doMineReal(ctx context.Context, player *Player) *CommandRes
 	}
 
 	// Success chance: base 30% + mining*5 + STR/10
-	chance := 30 + miningSkill*5 + player.Strength/10
+	chance := 30 + miningSkill*5 + player.EffectiveStat(StatStrength)/10
 	if chance > 90 {
 		chance = 90
 	}
@@ -478,35 +478,34 @@ func (e *GameEngine) doWork(ctx context.Context, player *Player, args []string) 
 		// Find matching material in inventory
 		materialIdx := -1
 		materialAdj := 0
+
+		// Search inventory for the material
 		for j, ii := range player.Inventory {
 			mDef := e.items[ii.Archetype]
 			if mDef == nil {
 				continue
 			}
-			if mDef.Type == "MATERIAL" || mDef.Type == "MATERIAL2" {
-				if mDef.Parameter2 == 8 || mDef.Parameter2 == 0 { // weaponsmithing material
-					mName := strings.ToLower(e.getItemNounName(mDef))
-					// Check both definition adjective and instance adjective
-					defAdj := ""
-					if mDef.Parameter1 > 0 {
-						defAdj = strings.ToLower(e.getAdjName(mDef.Parameter1))
-					}
-					instAdj := strings.ToLower(e.getAdjName(ii.Adj1))
-					if strings.Contains(mName, metal) || strings.Contains(defAdj, metal) ||
-						strings.Contains(instAdj, metal) || strings.HasPrefix(metal, defAdj) ||
-						strings.HasPrefix(metal, instAdj) {
-						materialIdx = j
-						if ii.Adj1 > 0 {
-							materialAdj = ii.Adj1 // prefer instance adjective
-						} else if mDef.Parameter1 > 0 {
-							materialAdj = mDef.Parameter1
-						}
-						break
-					}
+
+			// Check if it's a material for Weaponsmithing (Skill 8)
+			if (mDef.Type == "MATERIAL" || mDef.Type == "MATERIAL2" || mDef.Type == "MISC") && (mDef.Parameter2 == 8 || mDef.Parameter2 == 0) {
+
+				// Get the names for comparison
+				mNoun := strings.ToLower(e.getItemNounName(mDef)) // e.g., "metal"
+				instAdj := strings.ToLower(e.getAdjName(ii.Adj1)) // e.g., "copper"
+
+				// FLEXIBLE MATCHING:
+				// Check if the user's input matches the adjective, the noun, or the combined name
+				fullItemName := instAdj + " " + mNoun // e.g., "copper metal"
+
+				if metal == instAdj || metal == mNoun || metal == fullItemName ||
+					strings.Contains(fullItemName, metal) {
+
+					materialIdx = j
+					materialAdj = ii.Adj1
+					break
 				}
 			}
 		}
-
 		if materialIdx < 0 {
 			// Also accept the metal name directly as a known metal type
 			knownMetals := []string{"copper", "iron", "brass", "bronze", "steel", "truesteel", "randar", "elkyri"}
@@ -556,7 +555,6 @@ func (e *GameEngine) doWork(ctx context.Context, player *Player, args []string) 
 			RoomBroadcast: []string{fmt.Sprintf("%s works diligently at the forge.", player.FirstName)},
 			PlayerState:   player,
 		}
-
 	case 2: // Heated → Hammer
 		player.CraftingStep = 3
 		player.RoundTimeExpiry = time.Now().Add(15 * time.Second)
@@ -780,73 +778,194 @@ func (e *GameEngine) doRepair(ctx context.Context, player *Player, args []string
 }
 
 // ---- FORAGING ----
-
 func (e *GameEngine) doForageReal(ctx context.Context, player *Player) *CommandResult {
+
+	// Check existing roundtime.
+	if time.Now().Before(player.RoundTimeExpiry) {
+		remaining := time.Until(player.RoundTimeExpiry).Seconds()
+
+		return &CommandResult{
+			Messages: []string{
+				fmt.Sprintf("[Wait %.0f seconds...]", remaining),
+			},
+		}
+	}
+
 	room := e.rooms[player.RoomNumber]
 	if room == nil {
-		return &CommandResult{Messages: []string{"You can't forage here."}}
+		return &CommandResult{
+			Messages: []string{"You can't forage here."},
+		}
 	}
 
 	terrain := room.Terrain
-	switch terrain {
-	case "FOREST", "MOUNTAIN", "PLAIN", "SWAMP", "JUNGLE":
-		// OK
-	default:
-		return &CommandResult{Messages: []string{"There is nothing to forage here."}}
-	}
 
-	// Check for forage definitions matching this terrain
+	// Find FORAGEDEF entries matching this terrain.
 	var candidates []gameworld.ForageDef
+
 	for _, fd := range e.forageDefs {
 		if strings.EqualFold(fd.Terrain, terrain) {
 			candidates = append(candidates, fd)
 		}
 	}
 
-	// If no ForageDefs loaded, use generic fallback
+	// No forage table for this terrain.
 	if len(candidates) == 0 {
-		return e.doForageFallback(ctx, player, terrain)
-	}
-
-	// Weighted random selection
-	totalRatio := 0
-	for _, fd := range candidates {
-		totalRatio += fd.Ratio
-	}
-	if totalRatio <= 0 {
-		return e.doForageFallback(ctx, player, terrain)
-	}
-
-	roll := rand.Intn(totalRatio)
-	cumulative := 0
-	for _, fd := range candidates {
-		cumulative += fd.Ratio
-		if roll < cumulative {
-			itemDef := e.items[fd.ItemNum]
-			if itemDef == nil {
-				continue
-			}
-			item := InventoryItem{
-				Archetype: fd.ItemNum,
-				Val2:      fd.Val2,
-				Val5:      fd.Val5,
-			}
-			if fd.AdjNum > 0 {
-				item.Adj1 = fd.AdjNum
-			}
-			player.Inventory = append(player.Inventory, item)
-			e.SavePlayer(ctx, player)
-
-			itemName := e.formatItemName(itemDef, item.Adj1, 0, 0)
-			return &CommandResult{
-				Messages:      []string{fmt.Sprintf("You search the area and find some %s!", itemName)},
-				RoomBroadcast: []string{fmt.Sprintf("%s forages in the area.", player.FirstName)},
-				PlayerState:   player,
-			}
+		return &CommandResult{
+			Messages: []string{"There is nothing to forage here."},
 		}
 	}
 
-	return &CommandResult{Messages: []string{"You search but find nothing useful."}}
+	// Foraging requires Woodlore (skill 18).
+	woodlore := player.Skills[18]
+
+	if woodlore <= 0 {
+		return &CommandResult{
+			Messages: []string{
+				"You lack the woodlore necessary to forage effectively.",
+			},
+		}
+	}
+
+	// Every valid forage attempt takes 20 seconds.
+	rtSec := 20
+	player.RoundTimeExpiry = time.Now().Add(
+		time.Duration(rtSec) * time.Second,
+	)
+
+	// LOFP-style skill check:
+	// 25% base + 5% per Woodlore rank.
+	chance := 25 + woodlore*5
+
+	if chance > 95 {
+		chance = 95
+	}
+
+	forageRoll := rand.Intn(100) + 1
+
+	// Failed forage attempt.
+	if forageRoll > chance {
+		e.SavePlayer(ctx, player)
+
+		return &CommandResult{
+			Messages: []string{
+				"You search the area but find nothing useful.",
+				fmt.Sprintf("[Round: %d sec]", rtSec),
+			},
+			RoomBroadcast: []string{
+				fmt.Sprintf(
+					"%s forages in the area.",
+					player.FirstName,
+				),
+			},
+			PlayerState: player,
+		}
+	}
+
+	// Successful forage attempt.
+	// Ratio determines the relative probability of which
+	// forageable item is found.
+	totalRatio := 0
+
+	for _, fd := range candidates {
+		if fd.Ratio > 0 {
+			totalRatio += fd.Ratio
+		}
+	}
+
+	// Invalid/empty forage table.
+	if totalRatio <= 0 {
+		e.SavePlayer(ctx, player)
+
+		return &CommandResult{
+			Messages: []string{
+				"You search the area but find nothing useful.",
+				fmt.Sprintf("[Round: %d sec]", rtSec),
+			},
+			RoomBroadcast: []string{
+				fmt.Sprintf(
+					"%s forages in the area.",
+					player.FirstName,
+				),
+			},
+			PlayerState: player,
+		}
+	}
+
+	// Weighted random selection from the FORAGEDEF table.
+	roll := rand.Intn(totalRatio)
+	cumulative := 0
+
+	for _, fd := range candidates {
+		if fd.Ratio <= 0 {
+			continue
+		}
+
+		cumulative += fd.Ratio
+
+		if roll >= cumulative {
+			continue
+		}
+
+		itemDef := e.items[fd.ItemNum]
+		if itemDef == nil {
+			continue
+		}
+
+		item := InventoryItem{
+			Archetype: fd.ItemNum,
+			Val2:      fd.Val2,
+			Val5:      fd.Val5,
+		}
+
+		if fd.AdjNum > 0 {
+			item.Adj1 = fd.AdjNum
+		}
+
+		player.Inventory = append(player.Inventory, item)
+		e.SavePlayer(ctx, player)
+
+		itemName := e.formatItemName(
+			itemDef,
+			item.Adj1,
+			item.Adj2,
+			item.Adj3,
+		)
+
+		return &CommandResult{
+			Messages: []string{
+				fmt.Sprintf(
+					"You search the area and find %s!",
+					itemName,
+				),
+				fmt.Sprintf("[Round: %d sec]", rtSec),
+			},
+			RoomBroadcast: []string{
+				fmt.Sprintf(
+					"%s forages in the area.",
+					player.FirstName,
+				),
+			},
+			PlayerState: player,
+		}
+	}
+
+	// Bad item reference or otherwise unusable forage entry.
+	e.SavePlayer(ctx, player)
+
+	return &CommandResult{
+		Messages: []string{
+			"You search the area but find nothing useful.",
+			fmt.Sprintf("[Round: %d sec]", rtSec),
+		},
+		RoomBroadcast: []string{
+			fmt.Sprintf(
+				"%s forages in the area.",
+				player.FirstName,
+			),
+		},
+		PlayerState: player,
+	}
 }
 
 // doForageFallback provides generic foraging when no ForageDefs are loaded.
