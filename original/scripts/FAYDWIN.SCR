@@ -389,6 +389,11 @@ EXIT N 223
 EXIT W 254
 ITEM 0 396
 ITEM 1 202
+
+;ITEM 0 168 VAL3=228
+;ITEM 1 168 VAL3=228
+;ITEM 2 168 VAL3=228
+
 *DESCRIPTION_START ITEM ON 0
 There is a manuscript detailing the items for sale by the Armorers Guild here.
 *DESCRIPTION_END
@@ -1788,6 +1793,14 @@ EXIT SE 291
 EXIT SW 290
 EXIT ABOVE 2152
 ITEM 0 68 ADJ1=25 ADJ2=192 VAL2=2605
+IFVERB TOUCH 0
+  RANDOM DUMMY1 10
+  ADD DUMMY1 1
+  STRCVT 0 DUMMY1
+  ECHO PLAYER A bolt of lightning leaps from the black gate and strikes you for %0 damage!
+  ECHO OTHERS A bolt of lightning leaps from the black gate and strikes %N!
+  DAMAGEPLR ELECTRIC DUMMY1
+ENDIF
 ;
 NUMBER 290
 NAME Poor Quarter
