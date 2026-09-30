@@ -63,7 +63,7 @@ func (e *GameEngine) doMineReal(ctx context.Context, player *Player) *CommandRes
 	}
 
 	// Success chance: base 30% + mining*5 + STR/10
-	chance := 30 + miningSkill*5 + player.Strength/10
+	chance := 30 + miningSkill*5 + player.EffectiveStat(StatStrength)/10
 	if chance > 90 {
 		chance = 90
 	}
@@ -460,7 +460,7 @@ func (e *GameEngine) doWork(ctx context.Context, player *Player, args []string) 
 
 	// Check roundtime
 	if player.RoundTimeExpiry.After(time.Now()) {
-		remaining := player.RoundTimeExpiry.Sub(time.Now()).Seconds()
+		remaining := time.Until(player.RoundTimeExpiry).Seconds()
 		return &CommandResult{Messages: []string{fmt.Sprintf("You are still working... %.0f seconds remaining.", remaining+0.5)}}
 	}
 
@@ -478,35 +478,34 @@ func (e *GameEngine) doWork(ctx context.Context, player *Player, args []string) 
 		// Find matching material in inventory
 		materialIdx := -1
 		materialAdj := 0
+
+		// Search inventory for the material
 		for j, ii := range player.Inventory {
 			mDef := e.items[ii.Archetype]
 			if mDef == nil {
 				continue
 			}
-			if mDef.Type == "MATERIAL" || mDef.Type == "MATERIAL2" {
-				if mDef.Parameter2 == 8 || mDef.Parameter2 == 0 { // weaponsmithing material
-					mName := strings.ToLower(e.getItemNounName(mDef))
-					// Check both definition adjective and instance adjective
-					defAdj := ""
-					if mDef.Parameter1 > 0 {
-						defAdj = strings.ToLower(e.getAdjName(mDef.Parameter1))
-					}
-					instAdj := strings.ToLower(e.getAdjName(ii.Adj1))
-					if strings.Contains(mName, metal) || strings.Contains(defAdj, metal) ||
-						strings.Contains(instAdj, metal) || strings.HasPrefix(metal, defAdj) ||
-						strings.HasPrefix(metal, instAdj) {
-						materialIdx = j
-						if ii.Adj1 > 0 {
-							materialAdj = ii.Adj1 // prefer instance adjective
-						} else if mDef.Parameter1 > 0 {
-							materialAdj = mDef.Parameter1
-						}
-						break
-					}
+
+			// Check if it's a material for Weaponsmithing (Skill 8)
+			if (mDef.Type == "MATERIAL" || mDef.Type == "MATERIAL2" || mDef.Type == "MISC") && (mDef.Parameter2 == 8 || mDef.Parameter2 == 0) {
+
+				// Get the names for comparison
+				mNoun := strings.ToLower(e.getItemNounName(mDef)) // e.g., "metal"
+				instAdj := strings.ToLower(e.getAdjName(ii.Adj1)) // e.g., "copper"
+
+				// FLEXIBLE MATCHING:
+				// Check if the user's input matches the adjective, the noun, or the combined name
+				fullItemName := instAdj + " " + mNoun // e.g., "copper metal"
+
+				if metal == instAdj || metal == mNoun || metal == fullItemName ||
+					strings.Contains(fullItemName, metal) {
+
+					materialIdx = j
+					materialAdj = ii.Adj1
+					break
 				}
 			}
 		}
-
 		if materialIdx < 0 {
 			// Also accept the metal name directly as a known metal type
 			knownMetals := []string{"copper", "iron", "brass", "bronze", "steel", "truesteel", "randar", "elkyri"}
@@ -556,7 +555,6 @@ func (e *GameEngine) doWork(ctx context.Context, player *Player, args []string) 
 			RoomBroadcast: []string{fmt.Sprintf("%s works diligently at the forge.", player.FirstName)},
 			PlayerState:   player,
 		}
-
 	case 2: // Heated → Hammer
 		player.CraftingStep = 3
 		player.RoundTimeExpiry = time.Now().Add(15 * time.Second)
@@ -720,11 +718,13 @@ func (e *GameEngine) doRepair(ctx context.Context, player *Player, args []string
 
 	// Check roundtime
 	if player.RoundTimeExpiry.After(time.Now()) {
-		remaining := player.RoundTimeExpiry.Sub(time.Now()).Seconds()
+		remaining := time.Until(player.RoundTimeExpiry).Seconds()
 		return &CommandResult{Messages: []string{fmt.Sprintf("You are still working... %.0f seconds remaining.", remaining+0.5)}}
 	}
 
 	target := strings.ToLower(strings.Join(args, " "))
+	target, ordSkip := parseOrdinal(target)
+	skip := ordSkip
 
 	// Find the weapon in inventory with DAMAGED state
 	for i, ii := range player.Inventory {
@@ -732,16 +732,25 @@ func (e *GameEngine) doRepair(ctx context.Context, player *Player, args []string
 		if def == nil {
 			continue
 		}
+
 		if !isWeapon(def.Type) {
 			continue
 		}
+
 		name := strings.ToLower(e.getItemNounName(def))
 		if !strings.HasPrefix(name, target) {
 			continue
 		}
 
+		if skip > 0 {
+			skip--
+			continue
+		}
+
 		if ii.State != "DAMAGED" {
-			return &CommandResult{Messages: []string{"That doesn't need repair."}}
+			return &CommandResult{
+				Messages: []string{"That doesn't need repair."},
+			}
 		}
 
 		// Skill check: base 40% + smithSkill*5
@@ -759,7 +768,14 @@ func (e *GameEngine) doRepair(ctx context.Context, player *Player, args []string
 		if roll > chance {
 			e.SavePlayer(ctx, player)
 			return &CommandResult{
-				Messages:      []string{fmt.Sprintf("[Success: %d%%, Roll %d] You are unable to repair the weapon.", chance, roll)},
+				Messages: []string{
+					fmt.Sprintf(
+						"[Success: %d%%, Roll %d] You are unable to repair the weapon.",
+						chance,
+						roll,
+					),
+					fmt.Sprintf("[Round: %d sec]", player.RoundTime),
+				},
 				RoomBroadcast: []string{fmt.Sprintf("%s works at the forge, trying to repair a weapon.", player.FirstName)},
 				PlayerState:   player,
 			}
@@ -767,12 +783,32 @@ func (e *GameEngine) doRepair(ctx context.Context, player *Player, args []string
 
 		// Success: remove DAMAGED state
 		player.Inventory[i].State = ""
+
+		xpMsgs := e.awardExperience(player, 50)
+
 		e.SavePlayer(ctx, player)
 
+		messages := []string{
+			fmt.Sprintf(
+				"[Success: %d%%, Roll %d] You carefully repair your %s.",
+				chance,
+				roll,
+				itemName,
+			),
+			fmt.Sprintf("[Round: %d sec]", player.RoundTime),
+		}
+
+		messages = append(messages, xpMsgs...)
+
 		return &CommandResult{
-			Messages:      []string{fmt.Sprintf("[Success: %d%%, Roll %d] You carefully repair your %s.", chance, roll, itemName)},
-			RoomBroadcast: []string{fmt.Sprintf("%s works at the forge, repairing a weapon.", player.FirstName)},
-			PlayerState:   player,
+			Messages: messages,
+			RoomBroadcast: []string{
+				fmt.Sprintf(
+					"%s works at the forge, repairing a weapon.",
+					player.FirstName,
+				),
+			},
+			PlayerState: player,
 		}
 	}
 
@@ -780,73 +816,206 @@ func (e *GameEngine) doRepair(ctx context.Context, player *Player, args []string
 }
 
 // ---- FORAGING ----
-
 func (e *GameEngine) doForageReal(ctx context.Context, player *Player) *CommandResult {
+
+	// Check existing roundtime.
+	if time.Now().Before(player.RoundTimeExpiry) {
+		remaining := time.Until(player.RoundTimeExpiry).Seconds()
+
+		return &CommandResult{
+			Messages: []string{
+				fmt.Sprintf("[Wait %.0f seconds...]", remaining),
+			},
+		}
+	}
+
 	room := e.rooms[player.RoomNumber]
 	if room == nil {
-		return &CommandResult{Messages: []string{"You can't forage here."}}
+		return &CommandResult{
+			Messages: []string{"You can't forage here."},
+		}
 	}
 
 	terrain := room.Terrain
-	switch terrain {
-	case "FOREST", "MOUNTAIN", "PLAIN", "SWAMP", "JUNGLE":
-		// OK
-	default:
-		return &CommandResult{Messages: []string{"There is nothing to forage here."}}
-	}
 
-	// Check for forage definitions matching this terrain
+	// Find FORAGEDEF entries matching this terrain.
 	var candidates []gameworld.ForageDef
+
 	for _, fd := range e.forageDefs {
 		if strings.EqualFold(fd.Terrain, terrain) {
 			candidates = append(candidates, fd)
 		}
 	}
 
-	// If no ForageDefs loaded, use generic fallback
+	// No forage table for this terrain.
 	if len(candidates) == 0 {
-		return e.doForageFallback(ctx, player, terrain)
-	}
-
-	// Weighted random selection
-	totalRatio := 0
-	for _, fd := range candidates {
-		totalRatio += fd.Ratio
-	}
-	if totalRatio <= 0 {
-		return e.doForageFallback(ctx, player, terrain)
-	}
-
-	roll := rand.Intn(totalRatio)
-	cumulative := 0
-	for _, fd := range candidates {
-		cumulative += fd.Ratio
-		if roll < cumulative {
-			itemDef := e.items[fd.ItemNum]
-			if itemDef == nil {
-				continue
-			}
-			item := InventoryItem{
-				Archetype: fd.ItemNum,
-				Val2:      fd.Val2,
-				Val5:      fd.Val5,
-			}
-			if fd.AdjNum > 0 {
-				item.Adj1 = fd.AdjNum
-			}
-			player.Inventory = append(player.Inventory, item)
-			e.SavePlayer(ctx, player)
-
-			itemName := e.formatItemName(itemDef, item.Adj1, 0, 0)
-			return &CommandResult{
-				Messages:      []string{fmt.Sprintf("You search the area and find some %s!", itemName)},
-				RoomBroadcast: []string{fmt.Sprintf("%s forages in the area.", player.FirstName)},
-				PlayerState:   player,
-			}
+		return &CommandResult{
+			Messages: []string{"There is nothing to forage here."},
 		}
 	}
 
-	return &CommandResult{Messages: []string{"You search but find nothing useful."}}
+	// Foraging requires Woodlore (skill 18).
+	woodlore := player.Skills[18]
+
+	if woodlore <= 0 {
+		return &CommandResult{
+			Messages: []string{
+				"You lack the woodlore necessary to forage effectively.",
+			},
+		}
+	}
+
+	// Every valid forage attempt takes 20 seconds.
+	rtSec := 20
+	player.RoundTimeExpiry = time.Now().Add(
+		time.Duration(rtSec) * time.Second,
+	)
+
+	// LOFP-style skill check:
+	// 25% base + 5% per Woodlore rank.
+	chance := 25 + woodlore*5
+
+	if chance > 95 {
+		chance = 95
+	}
+
+	forageRoll := rand.Intn(100) + 1
+
+	// Failed forage attempt.
+	if forageRoll > chance {
+		e.SavePlayer(ctx, player)
+
+		return &CommandResult{
+			Messages: []string{
+				"You search the area but find nothing useful.",
+				fmt.Sprintf("[Round: %d sec]", rtSec),
+			},
+			RoomBroadcast: []string{
+				fmt.Sprintf(
+					"%s forages in the area.",
+					player.FirstName,
+				),
+			},
+			PlayerState: player,
+		}
+	}
+
+	// Successful forage attempt.
+	// Ratio determines the relative probability of which
+	// forageable item is found.
+	totalRatio := 0
+
+	for _, fd := range candidates {
+		if fd.Ratio > 0 {
+			totalRatio += fd.Ratio
+		}
+	}
+
+	// Invalid/empty forage table.
+	if totalRatio <= 0 {
+		e.SavePlayer(ctx, player)
+
+		return &CommandResult{
+			Messages: []string{
+				"You search the area but find nothing useful.",
+				fmt.Sprintf("[Round: %d sec]", rtSec),
+			},
+			RoomBroadcast: []string{
+				fmt.Sprintf(
+					"%s forages in the area.",
+					player.FirstName,
+				),
+			},
+			PlayerState: player,
+		}
+	}
+
+	// Weighted random selection from the FORAGEDEF table.
+	roll := rand.Intn(totalRatio)
+	cumulative := 0
+
+	for _, fd := range candidates {
+		if fd.Ratio <= 0 {
+			continue
+		}
+
+		cumulative += fd.Ratio
+
+		if roll >= cumulative {
+			continue
+		}
+
+		itemDef := e.items[fd.ItemNum]
+		if itemDef == nil {
+			continue
+		}
+
+		item := InventoryItem{
+			Archetype: fd.ItemNum,
+			Val2:      fd.Val2,
+			Val5:      fd.Val5,
+		}
+
+		if fd.AdjNum > 0 {
+			item.Adj1 = fd.AdjNum
+		}
+
+		player.Inventory = append(player.Inventory, item)
+
+		// Successful forage earns experience.
+		xpMsgs := e.awardExperience(player, 100)
+
+		e.SavePlayer(ctx, player)
+
+		itemName := e.formatItemName(
+			itemDef,
+			item.Adj1,
+			item.Adj2,
+			item.Adj3,
+		)
+
+		messages := []string{
+			fmt.Sprintf(
+				"You search the area and find %s!",
+				itemName,
+			),
+		}
+
+		messages = append(messages, xpMsgs...)
+
+		messages = append(
+			messages,
+			fmt.Sprintf("[Round: %d sec]", rtSec),
+		)
+
+		return &CommandResult{
+			Messages: messages,
+			RoomBroadcast: []string{
+				fmt.Sprintf(
+					"%s forages in the area.",
+					player.FirstName,
+				),
+			},
+			PlayerState: player,
+		}
+	}
+
+	// Bad item reference or otherwise unusable forage entry.
+	e.SavePlayer(ctx, player)
+
+	return &CommandResult{
+		Messages: []string{
+			"You search the area but find nothing useful.",
+			fmt.Sprintf("[Round: %d sec]", rtSec),
+		},
+		RoomBroadcast: []string{
+			fmt.Sprintf(
+				"%s forages in the area.",
+				player.FirstName,
+			),
+		},
+		PlayerState: player,
+	}
 }
 
 // doForageFallback provides generic foraging when no ForageDefs are loaded.
@@ -906,6 +1075,84 @@ func (e *GameEngine) doForageFallback(ctx context.Context, player *Player, terra
 		RoomBroadcast: []string{fmt.Sprintf("%s forages in the area.", player.FirstName)},
 		PlayerState:   player,
 	}
+}
+
+func (e *GameEngine) resolveReagentType(item *InventoryItem) int {
+	if item == nil {
+		return 0
+	}
+
+	// An explicit value on this particular item always wins.
+	// This handles normally foraged, skinned, and scripted reagents.
+	if item.Val5 > 0 {
+		return item.Val5
+	}
+
+	matchesForage := func(fd gameworld.ForageDef) bool {
+		if fd.ItemNum != item.Archetype || fd.Val5 <= 0 {
+			return false
+		}
+
+		if fd.AdjNum <= 0 {
+			return true
+		}
+
+		return item.Adj1 == fd.AdjNum ||
+			item.Adj2 == fd.AdjNum ||
+			item.Adj3 == fd.AdjNum
+	}
+
+	// Check permanent/base forage definitions.
+	for _, fd := range e.baseForageDefs {
+		if matchesForage(fd) {
+			item.Val5 = fd.Val5
+			return item.Val5
+		}
+	}
+
+	// Check every seasonal forage definition.
+	for _, defs := range e.seasonalForageDefs {
+		for _, fd := range defs {
+			if matchesForage(fd) {
+				item.Val5 = fd.Val5
+				return item.Val5
+			}
+		}
+	}
+
+	// No FORAGEDEF matched. Check monster SKINITEM definitions.
+	// This handles shop-bought creature components such as newt eyes:
+	// STOREITEM gives us the archetype/adjective but not Val5.
+	for _, mon := range e.monsters {
+		if mon == nil || mon.SkinAdj <= 0 {
+			continue
+		}
+
+		// The shop item's adjective must identify the same creature skin.
+		if item.Adj1 != mon.SkinAdj &&
+			item.Adj2 != mon.SkinAdj &&
+			item.Adj3 != mon.SkinAdj {
+			continue
+		}
+
+		for _, sd := range mon.SkinItems {
+			if sd.Archetype == item.Archetype && sd.Val5 > 0 {
+				item.Val5 = sd.Val5
+				return item.Val5
+			}
+		}
+	}
+
+	// Legacy store-only reagent: newt eye.
+	// The alchemy guide classifies newt eyes as Mild Magic,
+	// corresponding to reagent type 9 (Miscellaneous, common).
+	if item.Archetype == 520 &&
+		(item.Adj1 == 1105 || item.Adj2 == 1105 || item.Adj3 == 1105) {
+		item.Val5 = 9
+		return item.Val5
+	}
+
+	return 0
 }
 
 // ---- DYEING ----
@@ -990,13 +1237,20 @@ func (e *GameEngine) doAnalyze(ctx context.Context, player *Player, args []strin
 	}
 	target := strings.ToLower(strings.Join(args, " "))
 
-	for _, ii := range player.Inventory {
+	for i := range player.Inventory {
+		ii := &player.Inventory[i]
+
 		def := e.items[ii.Archetype]
 		if def == nil {
 			continue
 		}
-		name := strings.ToLower(e.getItemNounName(def))
-		if !strings.HasPrefix(name, target) {
+		nounName := strings.ToLower(e.getItemNounName(def))
+		fullName := strings.ToLower(
+			e.formatItemName(def, ii.Adj1, ii.Adj2, ii.Adj3),
+		)
+
+		if !strings.HasPrefix(nounName, target) &&
+			!strings.HasPrefix(fullName, target) {
 			continue
 		}
 
@@ -1022,12 +1276,23 @@ func (e *GameEngine) doAnalyze(ctx context.Context, player *Player, args []strin
 		// Reagent analysis for alchemy
 		if containsFlag(def.Flags, "REAGENT") {
 			reagentTypes := map[int]string{
-				1: "Power (mild)", 2: "Power (strong)", 3: "Power (very strong)",
-				4: "Health", 5: "Harm", 6: "Body", 7: "Resist",
-				8: "Enhancement", 9: "Misc (common)", 10: "Misc (uncommon)",
-				11: "Misc (rare)", 12: "Mind", 13: "Protection",
+				1:  "Power 1",
+				2:  "Power 2",
+				3:  "Power 3",
+				4:  "Health",
+				5:  "Harm",
+				6:  "Body",
+				7:  "Resist",
+				8:  "Enhancement",
+				9:  "Miscellaneous, common",
+				10: "Miscellaneous, uncommon",
+				11: "Miscellaneous, rare",
+				12: "Mind",
+				13: "Protect",
 			}
-			rType := ii.Val5
+			//rType := ii.Val5
+			// Val5 isn't always stored, so resolve it from FORAGEDEF if necessary.
+			rType := e.resolveReagentType(ii)
 			typeName := reagentTypes[rType]
 			if typeName == "" {
 				typeName = "unknown"
@@ -1093,189 +1358,332 @@ var alchemyRecipes = []alchemyRecipe{
 
 // Reagent type letters mapped to val5 values
 var reagentLetters = map[int]string{
-	6: "A", 4: "B", 0: "C", 13: "D", 12: "E", 5: "F",
-	8: "G", 9: "H", 10: "I", 11: "J",
+	6:  "A",
+	4:  "B",
+	7:  "C", // Resist
+	13: "D",
+	12: "E",
+	5:  "F",
+	8:  "G",
+	9:  "H",
+	10: "I",
+	11: "J",
 }
+
 var catalystFromVal5 = map[int]int{1: 1, 2: 2, 3: 3}
 
 func (e *GameEngine) doBrew(ctx context.Context, player *Player, args []string) *CommandResult {
 	if player.Skills[31] < 1 {
 		return &CommandResult{Messages: []string{"You have no training in Alchemy."}}
 	}
+
 	if len(args) == 0 {
-		// List known recipes
 		var msgs []string
 		msgs = append(msgs, "=== Alchemy Recipes (by level) ===")
+
 		for _, r := range alchemyRecipes {
 			if r.level <= player.Skills[31] {
-				msgs = append(msgs, fmt.Sprintf("  Level %2d: %s (%s)", r.level, r.name, r.color))
+				msgs = append(
+					msgs,
+					fmt.Sprintf("  Level %2d: %s (%s)", r.level, r.name, r.color),
+				)
 			}
 		}
+
 		if len(msgs) == 1 {
 			msgs = append(msgs, "  You don't know any recipes at your current level.")
 		}
+
 		return &CommandResult{Messages: msgs}
 	}
 
 	// BREW <reagent> IN <container>
 	raw := strings.ToLower(strings.Join(args, " "))
 	reagentTarget, containerTarget := parseInClause(raw)
+
 	if containerTarget == "" {
-		return &CommandResult{Messages: []string{"Brew in what? Usage: BREW <reagent> IN <flask/vial>"}}
+		return &CommandResult{
+			Messages: []string{"Brew in what? Usage: BREW <reagent> IN <flask/vial>"},
+		}
 	}
 
-	// Find the reagent
+	// Find the reagent.
 	reagentIdx := -1
-	var reagentItem *InventoryItem
-	for i, ii := range player.Inventory {
+
+	for i := range player.Inventory {
+		ii := &player.Inventory[i]
 		def := e.items[ii.Archetype]
 		if def == nil {
 			continue
 		}
+
 		if !containsFlag(def.Flags, "REAGENT") {
 			continue
 		}
+
 		name := strings.ToLower(e.getItemNounName(def))
-		if strings.HasPrefix(name, reagentTarget) || strings.Contains(name, reagentTarget) {
+
+		if strings.HasPrefix(name, reagentTarget) ||
+			strings.Contains(name, reagentTarget) {
 			reagentIdx = i
-			reagentItem = &player.Inventory[i]
 			break
 		}
 	}
-	if reagentIdx < 0 || reagentItem == nil {
-		return &CommandResult{Messages: []string{"You don't have that reagent."}}
+
+	if reagentIdx < 0 {
+		return &CommandResult{
+			Messages: []string{"You don't have that reagent."},
+		}
 	}
 
-	// Find the container (flask, vial, bottle)
+	// Resolve the reagent type before doing anything with the inventory.
+	reagentItem := &player.Inventory[reagentIdx]
+	reagentVal5 := e.resolveReagentType(reagentItem)
+
+	if reagentVal5 <= 0 {
+		return &CommandResult{
+			Messages: []string{"That ingredient has no known alchemical properties."},
+		}
+	}
+
+	reagentDef := e.items[reagentItem.Archetype]
+	reagentName := "the reagent"
+
+	if reagentDef != nil {
+		reagentName = e.getItemNounName(reagentDef)
+	}
+
+	// Find the container.
 	containerIdx := -1
-	for i, ii := range player.Inventory {
+
+	for i := range player.Inventory {
+		if i == reagentIdx {
+			continue
+		}
+
+		ii := &player.Inventory[i]
 		def := e.items[ii.Archetype]
 		if def == nil {
 			continue
 		}
+
 		name := strings.ToLower(e.getItemNounName(def))
+
 		if def.Type == "LIQCONTAINER" || def.Container == "IN" {
-			if strings.HasPrefix(name, containerTarget) || strings.Contains(name, containerTarget) {
+			if strings.HasPrefix(name, containerTarget) ||
+				strings.Contains(name, containerTarget) {
 				containerIdx = i
 				break
 			}
 		}
 	}
+
 	if containerIdx < 0 {
-		return &CommandResult{Messages: []string{"You don't have a suitable container. You need a flask, vial, or bottle."}}
-	}
-
-	// Add reagent to the brew (track via container's Val fields)
-	// Val3 = accumulated recipe code character, Val5 = number of ingredients added
-	container := &player.Inventory[containerIdx]
-	reagentType := reagentLetters[reagentItem.Val5]
-	if reagentType == "" {
-		reagentType = "H" // default to mild magic
-	}
-
-	// Consume reagent
-	player.Inventory = append(player.Inventory[:reagentIdx], player.Inventory[reagentIdx+1:]...)
-	// Fix index if container was after reagent
-	if containerIdx > reagentIdx {
-		containerIdx--
-	}
-	container = &player.Inventory[containerIdx]
-
-	// Track ingredients in container's Val fields
-	ingredients := container.Val5
-	container.Val5 = ingredients + 1
-
-	// Store reagent type codes: Val4 encodes up to 3 ingredient types
-	// Simple encoding: multiply previous by 100 and add new
-	container.Val4 = container.Val4*100 + reagentItem.Val5
-
-	reagentDef := e.items[reagentItem.Archetype]
-	reagentName := "the reagent"
-	if reagentDef != nil {
-		reagentName = e.getItemNounName(reagentDef)
-	}
-
-	if container.Val5 < 3 {
-		e.SavePlayer(ctx, player)
 		return &CommandResult{
-			Messages:      []string{fmt.Sprintf("You add %s to the brew. (%d/3 ingredients)", reagentName, container.Val5)},
-			RoomBroadcast: []string{fmt.Sprintf("%s adds an ingredient to a bubbling brew.", player.FirstName)},
-			PlayerState:   player,
+			Messages: []string{
+				"You don't have a suitable container. You need a flask, vial, or bottle.",
+			},
 		}
 	}
 
-	// 3 ingredients added — attempt to brew!
-	// Decode the three ingredients
+	// Consume the reagent.
+	player.Inventory = append(
+		player.Inventory[:reagentIdx],
+		player.Inventory[reagentIdx+1:]...,
+	)
+
+	// Removing the reagent may shift the container index.
+	if containerIdx > reagentIdx {
+		containerIdx--
+	}
+
+	container := &player.Inventory[containerIdx]
+
+	// Val5 = number of ingredients currently in the brew.
+	container.Val5++
+
+	// Val4 stores the reagent Val5 values.
+	// Each reagent occupies two decimal digits.
+	container.Val4 = container.Val4*100 + reagentVal5
+
+	// We don't have a complete potion yet.
+	if container.Val5 < 3 {
+		e.SavePlayer(ctx, player)
+
+		return &CommandResult{
+			Messages: []string{
+				fmt.Sprintf(
+					"You add %s to the brew. (%d/3 ingredients)",
+					reagentName,
+					container.Val5,
+				),
+			},
+			RoomBroadcast: []string{
+				fmt.Sprintf(
+					"%s adds an ingredient to a bubbling brew.",
+					player.FirstName,
+				),
+			},
+			PlayerState: player,
+		}
+	}
+
+	// Three ingredients have been added.
 	code3 := container.Val4 % 100
 	code2 := (container.Val4 / 100) % 100
 	code1 := (container.Val4 / 10000) % 100
 
-	letter1 := reagentLetters[code1]
-	letter2 := reagentLetters[code2]
-	letter3 := reagentLetters[code3]
+	codes := []int{code1, code2, code3}
 
-	// Determine catalyst level from first ingredient
-	catLevel := catalystFromVal5[code1]
-	if catLevel == 0 {
-		catLevel = 1
+	// Find exactly one catalyst and exactly two normal reagents.
+	catLevel := 0
+	var reagentCodes []int
+
+	for _, code := range codes {
+		if catalyst := catalystFromVal5[code]; catalyst > 0 {
+			// More than one catalyst is invalid.
+			if catLevel != 0 {
+				container.Val4 = 0
+				container.Val5 = 0
+
+				e.SavePlayer(ctx, player)
+
+				return &CommandResult{
+					Messages: []string{
+						"A foul odor rises from the brew. The combination produces nothing useful.",
+					},
+					RoomBroadcast: []string{
+						fmt.Sprintf("%s's brew emits a foul odor.", player.FirstName),
+					},
+					PlayerState: player,
+				}
+			}
+
+			catLevel = catalyst
+			continue
+		}
+
+		// Must be a recognized non-catalyst reagent.
+		if _, ok := reagentLetters[code]; ok {
+			reagentCodes = append(reagentCodes, code)
+		}
 	}
 
-	// Try to match a recipe
+	// A valid potion requires:
+	//   1 catalyst
+	//   2 reagent categories
+	if catLevel == 0 || len(reagentCodes) != 2 {
+		container.Val4 = 0
+		container.Val5 = 0
+
+		e.SavePlayer(ctx, player)
+
+		return &CommandResult{
+			Messages: []string{
+				"A foul odor rises from the brew. The combination produces nothing useful.",
+			},
+			RoomBroadcast: []string{
+				fmt.Sprintf("%s's brew emits a foul odor.", player.FirstName),
+			},
+			PlayerState: player,
+		}
+	}
+
+	reagent1 := reagentLetters[reagentCodes[0]]
+	reagent2 := reagentLetters[reagentCodes[1]]
+
+	// Find the recipe.
 	for _, recipe := range alchemyRecipes {
 		if recipe.catalyst != catLevel {
 			continue
 		}
-		// Check if ingredients match (order doesn't matter for reagent1/reagent2)
-		match := false
-		if (letter2 == recipe.reagent1 && letter3 == recipe.reagent2) ||
-			(letter2 == recipe.reagent2 && letter3 == recipe.reagent1) ||
-			(letter1 == recipe.reagent1 && letter3 == recipe.reagent2) ||
-			(letter1 == recipe.reagent2 && letter3 == recipe.reagent1) {
-			match = true
-		}
-		_ = letter1 // catalyst is consumed too
-		if !match {
+
+		// Reagent order does not matter.
+		if !((reagent1 == recipe.reagent1 && reagent2 == recipe.reagent2) ||
+			(reagent1 == recipe.reagent2 && reagent2 == recipe.reagent1)) {
 			continue
 		}
 
-		// Check alchemy skill
+		// Valid recipe, but the player's Alchemy skill is too low.
 		if player.Skills[31] < recipe.level {
 			container.Val4 = 0
 			container.Val5 = 0
+
 			e.SavePlayer(ctx, player)
+
 			return &CommandResult{
 				Messages: []string{
 					"The brew bubbles violently! It's a valid recipe, but beyond your current skill.",
-					fmt.Sprintf("(Requires Alchemy level %d, you have %d)", recipe.level, player.Skills[31]),
+					fmt.Sprintf(
+						"(Requires Alchemy level %d, you have %d)",
+						recipe.level,
+						player.Skills[31],
+					),
 				},
 				PlayerState: player,
 			}
 		}
 
-		// Success! Create potion
-		container.Val3 = recipe.spellID // spell stored in container
+		// Success.
+		container.Val3 = recipe.spellID
+		// Potions normally contain 2-5 sips, limited by container capacity.
+		maxSips := 5
+
+		if containerDef := e.items[container.Archetype]; containerDef != nil &&
+			containerDef.Interior > 0 &&
+			containerDef.Interior < maxSips {
+			maxSips = containerDef.Interior
+		}
+
+		minSips := 2
+		if maxSips < minSips {
+			minSips = maxSips
+		}
+
+		container.Val2 = minSips
+		if maxSips > minSips {
+			container.Val2 += rand.Intn(maxSips - minSips + 1)
+		}
+
+		// Clear the temporary brewing state.
 		container.Val4 = 0
 		container.Val5 = 0
-		container.Val2 = 2 + rand.Intn(4) // 2-5 sips
+
 		e.SavePlayer(ctx, player)
 
 		return &CommandResult{
 			Messages: []string{
-				fmt.Sprintf("The brew shimmers magically! You have created a %s potion! (%s, %d sips)", recipe.name, recipe.color, container.Val2),
+				fmt.Sprintf(
+					"The brew shimmers magically! You have created a %s potion! (%s, %d sips)",
+					recipe.name,
+					recipe.color,
+					container.Val2,
+				),
 			},
-			RoomBroadcast: []string{fmt.Sprintf("%s completes a potion that shimmers with magical energy!", player.FirstName)},
-			PlayerState:   player,
+			RoomBroadcast: []string{
+				fmt.Sprintf(
+					"%s completes a potion that shimmers with magical energy!",
+					player.FirstName,
+				),
+			},
+			PlayerState: player,
 		}
 	}
 
-	// No match — failed recipe
+	// Three legitimate ingredients, but they don't form a known recipe.
 	container.Val4 = 0
 	container.Val5 = 0
+
 	e.SavePlayer(ctx, player)
+
 	return &CommandResult{
-		Messages:      []string{"A foul odor rises from the brew. The combination produces nothing useful."},
-		RoomBroadcast: []string{fmt.Sprintf("%s's brew emits a foul odor.", player.FirstName)},
-		PlayerState:   player,
+		Messages: []string{
+			"A foul odor rises from the brew. The combination produces nothing useful.",
+		},
+		RoomBroadcast: []string{
+			fmt.Sprintf("%s's brew emits a foul odor.", player.FirstName),
+		},
+		PlayerState: player,
 	}
 }
 
