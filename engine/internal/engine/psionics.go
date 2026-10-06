@@ -105,7 +105,9 @@ func (e *GameEngine) doPreparePsi(player *Player, args []string) *CommandResult 
 	if player.Dead {
 		return &CommandResult{Messages: []string{"You can't use psionics while dead."}}
 	}
-
+	if player.Unconscious {
+		return &CommandResult{Messages: []string{"You can't use psionics while unconscous."}}
+	}
 	// Check base psionic skill
 	if player.Skills[26] == 0 && !player.IsGM {
 		return &CommandResult{Messages: []string{"You have no training in Psionics."}}
@@ -280,6 +282,9 @@ func (e *GameEngine) doProjectPsi(ctx context.Context, player *Player, args []st
 	if player.Dead {
 		return &CommandResult{Messages: []string{"You can't use psionics while dead."}}
 	}
+	if player.Unconscious {
+		return &CommandResult{Messages: []string{"You can't use psionics while unconscous."}}
+	}
 	if player.PreparedPsi == 0 {
 		return &CommandResult{Messages: []string{"You have no discipline prepared. Use PSI <discipline> first."}}
 	}
@@ -312,7 +317,7 @@ func (e *GameEngine) doProjectPsi(ctx context.Context, player *Player, args []st
 	} else {
 		schoolSkill = player.Skills[27]
 	}
-	castChance := 50 + (psiSkill+schoolSkill)*3 + player.Willpower/5 - disc.Level*2
+	castChance := 50 + (psiSkill+schoolSkill)*3 + player.EffectiveStat(StatWillpower)/5 - disc.Level*2
 	if castChance < 15 {
 		castChance = 15
 	}
@@ -453,24 +458,63 @@ func (e *GameEngine) projectDamage(player *Player, disc *PsiDiscipline, args []s
 		}
 	}
 
-	killed := e.damageMonster(inst.ID, dmg)
+	killed := e.damageMonster(player, inst.ID, dmg, false)
+
+	brokeCharm := inst.RemoveStatEffect(CharmEffect)
+
 	if killed {
 		deathText := def.TextOverrides["TEXD"]
 		deathMsg := fmt.Sprintf("A %s collapses, dead!", name)
+
 		if deathText != "" {
 			deathMsg = fmt.Sprintf("A %s %s", name, deathText)
 		}
+
 		e.handleMonsterDeath(player, inst, def)
 		player.CombatTarget = nil
 		player.Joined = false
+
+		messages := []string{
+			fmt.Sprintf(
+				"You project %s at a %s for %d damage!",
+				disc.Name,
+				name,
+				dmg,
+			),
+			deathMsg,
+		}
+
 		return &CommandResult{
-			Messages:      []string{fmt.Sprintf("You project %s at a %s for %d damage!", disc.Name, name, dmg), deathMsg},
+			Messages:      messages,
 			RoomBroadcast: []string{fmt.Sprintf("%s focuses psychic energy at a %s!", player.FirstName, name), deathMsg},
 		}
 	}
+
+	messages := []string{
+		fmt.Sprintf(
+			"You project %s at a %s for %d damage!",
+			disc.Name,
+			name,
+			dmg,
+		),
+	}
+
+	if brokeCharm {
+		messages = append(
+			messages,
+			fmt.Sprintf("The pain snaps the %s out of the charm.", name),
+		)
+	}
+
 	return &CommandResult{
-		Messages:      []string{fmt.Sprintf("You project %s at a %s for %d damage!", disc.Name, name, dmg)},
-		RoomBroadcast: []string{fmt.Sprintf("%s focuses psychic energy at a %s!", player.FirstName, name)},
+		Messages: messages,
+		RoomBroadcast: []string{
+			fmt.Sprintf(
+				"%s focuses psychic energy at a %s!",
+				player.FirstName,
+				name,
+			),
+		},
 	}
 }
 
@@ -518,6 +562,7 @@ func (e *GameEngine) projectTeleport(ctx context.Context, player *Player, args [
 		return &CommandResult{Messages: []string{"That mark leads to a room that no longer exists."}}
 	}
 	oldRoom := player.RoomNumber
+	player.ResetRoomVars()
 	player.RoomNumber = roomNum
 	e.SavePlayer(ctx, player)
 	lookResult := e.doLook(player)
@@ -556,7 +601,7 @@ func (e *GameEngine) projectManipulateLock(player *Player, args []string) *Comma
 		}
 		// Skill check: psi skill + willpower vs lock difficulty
 		psiSkill := player.Skills[26] + player.Skills[28]
-		chance := 40 + psiSkill*3 + player.Willpower/5
+		chance := 40 + psiSkill*3 + player.EffectiveStat(StatWillpower)/5
 		if player.IsGM {
 			chance = 100
 		}
