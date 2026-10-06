@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -58,14 +59,14 @@ type ClientConn interface {
 type Session struct {
 	Player       *engine.Player
 	Conn         ClientConn
-	CaptureID    string    // active capture session ID, empty if not recording
-	lastCmdTime  time.Time // rate limiting: last command timestamp
-	cmdCount     int       // rate limiting: commands in current window
+	CaptureID    string      // active capture session ID, empty if not recording
+	lastCmdTime  time.Time   // rate limiting: last command timestamp
+	cmdCount     int         // rate limiting: commands in current window
 	chatTimes    []time.Time // chat flood: timestamps of recent broadcasts
 	cmdTimes     []time.Time // command rate: sliding window for 10/10s limit
-	authFailures int        // auth attempt failures (disconnect after 3)
-	lastActivity time.Time  // idle timeout tracking
-	quitSent     bool       // QUIT already broadcast departure
+	authFailures int         // auth attempt failures (disconnect after 3)
+	lastActivity time.Time   // idle timeout tracking
+	quitSent     bool        // QUIT already broadcast departure
 }
 
 // wsConn wraps a gorilla WebSocket connection to implement ClientConn.
@@ -102,7 +103,6 @@ func (w *wsConn) Close() error {
 func (w *wsConn) RemoteAddr() string {
 	return w.conn.RemoteAddr().String()
 }
-
 
 // getClientIP extracts the real client IP from the request, preferring
 // Fly-Client-IP (set by Fly.io proxy), then X-Forwarded-For, then RemoteAddr.
@@ -205,6 +205,13 @@ func NewServer(ge *engine.GameEngine, parsed *gameworld.ParsedData, authSvc *aut
 		s.broadcastToRoom(roomNumber, "", messages)
 	})
 
+	// Room broadcast that excludes one player — used by scheduled script segments
+	// (SETEVENT/CONTEVENT) whose triggering player already received the same
+	// ECHO ALL text via a direct message.
+	ge.SetRoomBroadcastExclude(func(roomNumber int, excludeName string, messages []string) {
+		s.broadcastToRoom(roomNumber, excludeName, messages)
+	})
+
 	// Local-only broadcast for monster activity (no hub, this machine only)
 	ge.SetLocalRoomBroadcast(func(roomNumber int, messages []string) {
 		s.mu.RLock()
@@ -224,9 +231,51 @@ func NewServer(ge *engine.GameEngine, parsed *gameworld.ParsedData, authSvc *aut
 		s.mu.RUnlock()
 	})
 
+	// Monster presence changes (spawn / wander in / wander out) — same as above but
+	// NOT suppressed by BattleBrief, which only hides monster RP actions and combat
+	// scroll. See engine.SetLocalRoomNotice.
+	ge.SetLocalRoomNotice(func(roomNumber int, excludeName string, messages []string) {
+		s.mu.RLock()
+		for _, sess := range s.sessions {
+			if sess.Player == nil || sess.Player.RoomNumber != roomNumber || (excludeName != "" && sess.Player.FirstName == excludeName) {
+				continue
+			}
+			filtered := filterBroadcastForPlayer(sess.Player, messages)
+			if len(filtered) > 0 {
+				s.sendBroadcast(sess, filtered)
+			}
+		}
+		s.mu.RUnlock()
+	})
+
+	// Same as above, but skips one named player — used for monster combat's public
+	// room line when that player already received their own private detail message
+	// (e.g. the [ToHit/Roll] breakdown), so they don't see the same hit described twice.
+	ge.SetLocalRoomBroadcastExclude(func(roomNumber int, excludeName string, messages []string) {
+		s.mu.RLock()
+		for _, sess := range s.sessions {
+			if sess.Player == nil || sess.Player.RoomNumber != roomNumber || sess.Player.FirstName == excludeName {
+				continue
+			}
+			if sess.Player.BattleBrief {
+				continue
+			}
+			filtered := filterBroadcastForPlayer(sess.Player, messages)
+			if len(filtered) > 0 {
+				s.sendBroadcast(sess, filtered)
+			}
+		}
+		s.mu.RUnlock()
+	})
+
 	// Set up player-targeted messages for background tasks (combat, etc.)
 	ge.SetSendToPlayer(func(playerName string, messages []string) {
 		s.sendToPlayer(playerName, messages)
+	})
+
+	// Set up GM-wide notifications for background tasks (e.g. a queued treasure drop)
+	ge.SetGMBroadcast(func(messages []string) {
+		s.broadcastToGMs(messages)
 	})
 
 	return s
@@ -267,6 +316,14 @@ func (s *Server) OnlinePlayers() []*engine.Player {
 			Hidden:     rp.Hidden,
 		})
 	}
+	// Go's map iteration order (the s.sessions range above) is randomized on
+	// every call — without a stable sort, two consecutive lookups of "the Nth
+	// player matching X" (e.g. "2 wolf" vs "3 wolf" when several wolf-form
+	// Wolflings share the displayed name "a wolf" — see findPlayerInRoom in
+	// the engine package) could each see a different relative order and
+	// resolve to inconsistent players. Sorting by FirstName makes the order
+	// deterministic across calls as long as the online player set is unchanged.
+	sort.Slice(players, func(i, j int) bool { return players[i].FirstName < players[j].FirstName })
 	return players
 }
 
@@ -305,6 +362,7 @@ func (s *Server) setupRoutes() {
 	// Characters (authenticated)
 	api.HandleFunc("/characters", s.handleListCharacters).Methods("GET")
 	api.HandleFunc("/characters", s.handleCreateCharacter).Methods("POST")
+	api.HandleFunc("/characters/roll", s.handleRollCharacter).Methods("POST")
 	api.HandleFunc("/characters/{firstName}", s.handleDeleteCharacter).Methods("DELETE")
 	api.HandleFunc("/characters/{firstName}/gm", s.handleToggleGM).Methods("PUT")
 	api.HandleFunc("/characters/{firstName}/apikey", s.handleGenerateAPIKey).Methods("POST")
@@ -345,6 +403,7 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/admin/characters/{firstName}", s.handleAdminGetCharacter).Methods("GET")
 	api.HandleFunc("/admin/characters/{firstName}/reassign", s.handleAdminReassignCharacter).Methods("PUT")
 	api.HandleFunc("/admin/logs", s.handleAdminLogs).Methods("GET")
+	api.HandleFunc("/admin/logs/{id}/resolve", s.handleAdminResolveLog).Methods("PUT")
 	api.HandleFunc("/admin/characters/deleted", s.handleAdminListDeletedCharacters).Methods("GET")
 	api.HandleFunc("/admin/characters/{firstName}/recover", s.handleAdminRecoverCharacter).Methods("PUT")
 
@@ -402,6 +461,64 @@ type CreateCharMsg struct {
 	LastName  string `json:"lastName"`
 	Race      int    `json:"race"`
 	Gender    int    `json:"gender"`
+
+	// Appearance is optional: an older/simpler client can omit it entirely and the
+	// engine will roll everything server-side. A client that ran the reroll/picker
+	// flow submits its accepted values here, which get validated in full before use.
+	Strength     int    `json:"strength,omitempty"`
+	Agility      int    `json:"agility,omitempty"`
+	Quickness    int    `json:"quickness,omitempty"`
+	Constitution int    `json:"constitution,omitempty"`
+	Perception   int    `json:"perception,omitempty"`
+	Willpower    int    `json:"willpower,omitempty"`
+	Empathy      int    `json:"empathy,omitempty"`
+	Height       int    `json:"height,omitempty"`
+	Weight       int    `json:"weight,omitempty"`
+	Age          int    `json:"age,omitempty"`
+	EyeColor     string `json:"eyeColor,omitempty"`
+	HairColor    string `json:"hairColor,omitempty"`
+	HairStyle    string `json:"hairStyle,omitempty"`
+	SkinColor    string `json:"skinColor,omitempty"`
+}
+
+// appearance builds a *engine.CharacterAppearance from the message fields, or nil
+// if none were provided at all (backward-compatible "roll everything" path).
+func (c *CreateCharMsg) appearance() *engine.CharacterAppearance {
+	a := &engine.CharacterAppearance{
+		Strength: c.Strength, Agility: c.Agility, Quickness: c.Quickness, Constitution: c.Constitution,
+		Perception: c.Perception, Willpower: c.Willpower, Empathy: c.Empathy,
+		Height: c.Height, Weight: c.Weight, Age: c.Age,
+		EyeColor: c.EyeColor, HairColor: c.HairColor, HairStyle: c.HairStyle, SkinColor: c.SkinColor,
+	}
+	if a.IsEmpty() {
+		return nil
+	}
+	return a
+}
+
+// RollCharacterRequest is the body for POST /characters/roll.
+type RollCharacterRequest struct {
+	Race   int `json:"race"`
+	Gender int `json:"gender"`
+}
+
+func (s *Server) handleRollCharacter(w http.ResponseWriter, r *http.Request) {
+	accountID := s.getAccountID(r)
+	if accountID == "" {
+		http.Error(w, "unauthorized", 401)
+		return
+	}
+	var req RollCharacterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", 400)
+		return
+	}
+	if req.Race < 1 || req.Race > 8 || (req.Gender != engine.GenderMale && req.Gender != engine.GenderFemale) {
+		http.Error(w, "invalid race or gender", 400)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(engine.RollCharacterAppearance(req.Race, req.Gender))
 }
 
 type AuthMsg struct {
@@ -490,7 +607,9 @@ func (s *Server) handleGameWS(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		s.connMu.Lock()
 		s.connsByIP[ip]--
-		if s.connsByIP[ip] <= 0 { delete(s.connsByIP, ip) }
+		if s.connsByIP[ip] <= 0 {
+			delete(s.connsByIP, ip)
+		}
 		s.connMu.Unlock()
 	}()
 
@@ -607,6 +726,7 @@ func (s *Server) handleGameWS(w http.ResponseWriter, r *http.Request) {
 				}
 				continue
 			}
+			player.RestoreTransientState()
 			session.Player = player
 			s.mu.Lock()
 			s.sessions[player.FirstName] = session
@@ -616,10 +736,12 @@ func (s *Server) handleGameWS(w http.ResponseWriter, r *http.Request) {
 				player.IsGM, player.GMHat, player.GMHidden, player.GMInvis, player.Hidden)
 			s.gamelog.Log(gamelog.EventGameEnter, player.FullName(), player.AccountID,
 				"bot login via API key", player.RoomNumber, "")
-			if !player.GMInvis && !player.GMHidden && !player.IsBot {
+			// GMs log in and out frequently for admin work — skip the announcement
+			// for them regardless of concealment state.
+			if !player.IsConcealed() && !player.IsBot && !player.IsGM {
 				s.broadcastGlobal(player.FirstName,
 					[]string{fmt.Sprintf("** %s has just entered the Realms.", player.FirstName)})
-				s.broadcastToRoom(player.RoomNumber, player.FirstName, []string{fmt.Sprintf("%s arrives.", player.FirstName)})
+				s.broadcastToRoom(player.RoomNumber, player.FirstName, []string{fmt.Sprintf("%s arrives.", player.DisplayNameCap())})
 			}
 			result := s.engine.EnterRoom(ctx, player)
 			s.sendResult(session, result)
@@ -661,13 +783,21 @@ func (s *Server) handleGameWS(w http.ResponseWriter, r *http.Request) {
 					session.Conn.SendTypedMessage("error", map[string]interface{}{"message": "You can have at most 8 characters per account."})
 					continue
 				}
-				player = s.engine.CreateNewPlayer(ctx, create.FirstName, create.LastName, create.Race, create.Gender, accountID)
+				appearance := create.appearance()
+				if appearance != nil {
+					if err := engine.ValidateCharacterAppearance(create.Race, create.Gender, appearance); err != nil {
+						session.Conn.SendTypedMessage("error", map[string]interface{}{"message": err.Error()})
+						continue
+					}
+				}
+				player = s.engine.CreateNewPlayer(ctx, create.FirstName, create.LastName, create.Race, create.Gender, appearance, accountID)
 				s.gamelog.Log(gamelog.EventCharacterCreate, player.FullName(), accountID,
 					fmt.Sprintf("Race: %s, Gender: %d", player.RaceName(), player.Gender),
 					player.RoomNumber, "")
 				s.sendResult(session, &engine.CommandResult{
 					Messages: []string{
 						fmt.Sprintf("Welcome to the Shattered Realms, %s the %s!", player.FullName(), player.RaceName()),
+						"Type HELP for a full list of commands, or ADVICE to get some tips for getting started.",
 						"",
 					},
 				})
@@ -684,6 +814,7 @@ func (s *Server) handleGameWS(w http.ResponseWriter, r *http.Request) {
 					},
 				})
 			}
+			player.RestoreTransientState()
 			session.Player = player
 
 			// Disconnect existing session for this character (e.g. stale WS)
@@ -703,10 +834,12 @@ func (s *Server) handleGameWS(w http.ResponseWriter, r *http.Request) {
 			// Log character entering the game world
 			s.gamelog.Log(gamelog.EventGameEnter, player.FullName(), accountID,
 				fmt.Sprintf("%s (%s)", authName, authEmail), player.RoomNumber, "")
-			if !player.GMInvis && !player.GMHidden {
+			// GMs log in and out frequently for admin work — skip the announcement
+			// for them regardless of concealment state.
+			if !player.IsConcealed() && !player.IsGM {
 				s.broadcastGlobal(player.FirstName,
 					[]string{fmt.Sprintf("** %s has just entered the Realms.", player.FirstName)})
-				s.broadcastToRoom(player.RoomNumber, player.FirstName, []string{fmt.Sprintf("%s arrives.", player.FirstName)})
+				s.broadcastToRoom(player.RoomNumber, player.FirstName, []string{fmt.Sprintf("%s arrives.", player.DisplayNameCap())})
 			}
 
 			result := s.engine.EnterRoom(ctx, player)
@@ -755,77 +888,88 @@ func (s *Server) handleGameWS(w http.ResponseWriter, r *http.Request) {
 			}
 			// Track activity for idle timeout
 			session.lastActivity = time.Now()
-			now := time.Now()
 
-			// Rate limit 1: max 4 commands per second (burst)
-			if now.Sub(session.lastCmdTime) > time.Second {
-				session.cmdCount = 0
-				session.lastCmdTime = now
-			}
-			session.cmdCount++
-			if session.cmdCount > 4 {
-				s.sendResult(session, &engine.CommandResult{
-					Messages: []string{"[Slow down! Too many commands.]"},
-				})
-				continue
-			}
-			// Rate limit 2: max 10 commands per 10 seconds (sustained)
-			cutoff := now.Add(-10 * time.Second)
-			var recentCmds []time.Time
-			for _, t := range session.cmdTimes {
-				if t.After(cutoff) { recentCmds = append(recentCmds, t) }
-			}
-			session.cmdTimes = append(recentCmds, now)
-			if len(session.cmdTimes) > 10 {
-				s.sendResult(session, &engine.CommandResult{
-					Messages: []string{"[Slow down! Too many commands.]"},
-				})
-				continue
-			}
 			var cmd CommandMsg
 			json.Unmarshal(msg.Data, &cmd)
-			ctx := context.Background()
-			playerRoom := session.Player.RoomNumber
-			result := s.engine.ProcessCommand(ctx, session.Player, cmd.Input)
-			result.PlayerState = session.Player
-			result.PromptIndicators = session.Player.PromptIndicators()
-			s.sendResult(session, result)
 
-			// Capture input and output
-			if session.CaptureID != "" {
-				var lines []capture.Line
-				lines = append(lines, capture.Line{Time: time.Now(), Type: "input", Text: cmd.Input})
-				for _, m := range result.Messages {
-					lines = append(lines, capture.Line{Time: time.Now(), Type: "output", Text: m})
-				}
-				log.Printf("capture: appending %d lines to %s", len(lines), session.CaptureID)
-				go func() {
-					if err := s.captures.AppendLines(context.Background(), session.CaptureID, lines); err != nil {
-						log.Printf("capture: append failed: %v", err)
-					}
-				}()
-			}
-
-			// Chat flood protection: 5 broadcast messages per 10 seconds
-			if len(result.RoomBroadcast) > 0 {
+			for _, subInput := range splitCommandChain(cmd.Input) {
 				now := time.Now()
-				cutoff := now.Add(-10 * time.Second)
-				var recent []time.Time
-				for _, t := range session.chatTimes {
-					if t.After(cutoff) { recent = append(recent, t) }
-				}
-				session.chatTimes = recent
-				if len(session.chatTimes) >= 5 {
-					s.sendResult(session, &engine.CommandResult{
-						Messages: []string{"[You are sending messages too quickly. Please wait.]"},
-					})
-					continue
-				}
-				session.chatTimes = append(session.chatTimes, now)
-			}
+				isGive := strings.HasPrefix(strings.ToLower(subInput), "give ")
 
-			s.dispatchCommandResult(session, result)
-			_ = playerRoom
+				// Rate limit 1: max 8 commands per second (burst)
+				if now.Sub(session.lastCmdTime) > time.Second {
+					session.cmdCount = 0
+					session.lastCmdTime = now
+				}
+				session.cmdCount++
+				if !session.Player.IsGM && !isGive && session.cmdCount > 8 {
+					s.sendResult(session, &engine.CommandResult{
+						Messages: []string{"[Slow down! Too many commands.]"},
+					})
+					break
+				}
+				// Rate limit 2: max 20 commands per 10 seconds (sustained)
+				cutoff := now.Add(-10 * time.Second)
+				var recentCmds []time.Time
+				for _, t := range session.cmdTimes {
+					if t.After(cutoff) {
+						recentCmds = append(recentCmds, t)
+					}
+				}
+				session.cmdTimes = append(recentCmds, now)
+				if !session.Player.IsGM && !isGive && len(session.cmdTimes) > 20 {
+					s.sendResult(session, &engine.CommandResult{
+						Messages: []string{"[Slow down! Too many commands.]"},
+					})
+					break
+				}
+				ctx := context.Background()
+				result := s.engine.ProcessCommand(ctx, session.Player, subInput)
+				result.PlayerState = session.Player
+				result.PromptIndicators = session.Player.PromptIndicators()
+				s.sendResult(session, result)
+
+				// Capture input and output
+				if session.CaptureID != "" {
+					var lines []capture.Line
+					lines = append(lines, capture.Line{Time: time.Now(), Type: "input", Text: subInput})
+					for _, m := range result.Messages {
+						lines = append(lines, capture.Line{Time: time.Now(), Type: "output", Text: m})
+					}
+					log.Printf("capture: appending %d lines to %s", len(lines), session.CaptureID)
+					go func() {
+						if err := s.captures.AppendLines(context.Background(), session.CaptureID, lines); err != nil {
+							log.Printf("capture: append failed: %v", err)
+						}
+					}()
+				}
+
+				// Chat flood protection: 10 broadcast messages per 9 seconds
+				if len(result.RoomBroadcast) > 0 {
+					floodNow := time.Now()
+					floodCutoff := floodNow.Add(-9 * time.Second)
+					var recent []time.Time
+					for _, t := range session.chatTimes {
+						if t.After(floodCutoff) {
+							recent = append(recent, t)
+						}
+					}
+					session.chatTimes = recent
+					if len(session.chatTimes) >= 10 {
+						s.sendResult(session, &engine.CommandResult{
+							Messages: []string{"[You are sending messages too quickly. Please wait.]"},
+						})
+						break
+					}
+					session.chatTimes = append(session.chatTimes, floodNow)
+				}
+
+				s.dispatchCommandResult(session, result)
+
+				if result.Quit {
+					break
+				}
+			}
 		}
 	}
 
@@ -842,15 +986,18 @@ func (s *Server) handleGameWS(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 
 		if isActive {
+			s.engine.HandlePlayerDisconnect(session.Player)
 			s.gamelog.Log(gamelog.EventGameExit, session.Player.FullName(), session.Player.AccountID,
 				fmt.Sprintf("%s (%s)", authName, authEmail), session.Player.RoomNumber, "")
-			if !session.Player.GMInvis && !session.Player.GMHidden {
+			// GMs log in and out frequently for admin work — skip the announcement
+			// for them regardless of GMInvis/GMHidden, not just while actively concealed.
+			if !session.Player.GMInvis && !session.Player.GMHidden && !session.Player.IsGM {
 				if !session.quitSent {
 					s.broadcastGlobal(session.Player.FirstName,
-						[]string{fmt.Sprintf("** %s has just left the Realms.", session.Player.FirstName)})
+						[]string{fmt.Sprintf("** %s has just left the Realms.", session.Player.DisplayNameCap())})
 				}
 				s.broadcastToRoom(session.Player.RoomNumber, session.Player.FirstName,
-					[]string{fmt.Sprintf("%s fades from the Realms.", session.Player.FirstName)})
+					[]string{fmt.Sprintf("%s fades from the Realms.", session.Player.DisplayNameCap())})
 			}
 			s.hub.UnregisterPlayer(session.Player.FirstName)
 		}
@@ -875,8 +1022,19 @@ func (s *Server) dispatchCommandResult(session *Session, result *engine.CommandR
 	sanitizeMessages(result.GlobalBroadcast)
 	sanitizeMessages(result.GMBroadcast)
 
-	// Broadcast to others in the room (excluding emote target if they get a special message)
-	if len(result.RoomBroadcast) > 0 {
+	// Broadcast to others in the room (excluding emote target if they get a special message).
+	// A concealed actor (Hidden, Invisible spell, Phantom Form, or a GM with @hide/@invis
+	// set — see Player.IsConcealed) produces NO room-visible trace of their action at all
+	// by default: this is the single choke point every command's RoomBroadcast/OldRoomMsg
+	// passes through (shared by the WebSocket, telnet, and SSH paths), so gating it here
+	// covers every command handler uniformly instead of relying on each one to remember
+	// its own check. A command that has already built its own appropriately-anonymized
+	// text for a still-concealed actor (see ConcealedBroadcastOK) opts out of the
+	// suppression instead — e.g. GIVE reveals a Hidden giver outright but keeps an
+	// Invisible one unnamed ("Something gives a sword to Bob.") rather than silent.
+	concealed := session.Player.IsConcealed()
+	suppress := concealed && !result.ConcealedBroadcastOK
+	if len(result.RoomBroadcast) > 0 && !suppress {
 		if result.TargetName != "" {
 			s.broadcastToRoom(session.Player.RoomNumber, session.Player.FirstName, result.RoomBroadcast, result.TargetName)
 		} else {
@@ -888,8 +1046,10 @@ func (s *Server) dispatchCommandResult(session *Session, result *engine.CommandR
 		s.sendToPlayer(result.TargetName, result.TargetMsg)
 	}
 	// Broadcast departure to old room (movement)
-	if result.OldRoom > 0 && len(result.OldRoomMsg) > 0 {
+	if result.OldRoom > 0 && len(result.OldRoomMsg) > 0 && !suppress {
 		s.broadcastToRoom(result.OldRoom, session.Player.FirstName, result.OldRoomMsg)
+	}
+	if result.OldRoom > 0 {
 		s.hub.UpdatePlayerRoom(session.Player.FirstName, session.Player.RoomNumber)
 	}
 	// Whisper to specific target
@@ -986,11 +1146,17 @@ func filterBroadcastForPlayer(player *engine.Player, messages []string) []string
 			if strings.Contains(msg, "looks a little better") ||
 				strings.Contains(msg, "looks much better") ||
 				strings.Contains(msg, "incants a spell") ||
+				strings.Contains(msg, "prepares a spell") ||
 				strings.Contains(msg, "gestures") ||
 				strings.Contains(msg, " drinks ") ||
 				strings.Contains(msg, " eats ") {
 				continue
 			}
+		}
+		// ActBrief: ACT command broadcasts always arrive parenthesized "(Name does X)";
+		// strip the parens for viewers who have their own actbrief toggle on.
+		if player.ActBrief && len(msg) >= 2 && msg[0] == '(' && msg[len(msg)-1] == ')' {
+			msg = msg[1 : len(msg)-1]
 		}
 		filtered = append(filtered, msg)
 	}
@@ -1037,6 +1203,11 @@ func (s *Server) broadcastToRoom(roomNumber int, excludeName string, messages []
 		ExcludePlayers: allExcludes,
 		Messages:       messages,
 	})
+
+	// Relay to any summoner whose familiar/summoned creature is watching this room
+	// (COMMAND WATCH WILL) — covers player speech, actions, combat, and arrivals/departures,
+	// not just monster AI activity.
+	s.engine.ForwardToWatchers(roomNumber, messages)
 }
 
 func (s *Server) sendToPlayer(firstName string, messages []string) {
@@ -1180,6 +1351,46 @@ func sanitizeMessages(msgs []string) {
 		msgs[i] = strings.ReplaceAll(msg, "<", "&lt;")
 		msgs[i] = strings.ReplaceAll(msgs[i], ">", "&gt;")
 	}
+}
+
+// maxChainedCommands caps how many ';'-separated commands one input line can
+// expand into, so stacking can't be used to blow past the per-line rate
+// limits each command loop already enforces (see cmdCount/cmdTimes below).
+const maxChainedCommands = 8
+
+// splitCommandChain splits a raw input line on ';' into individual commands,
+// the way MUD clients (Mudlet, TinTin++, zMUD) let players stack several
+// commands on one line — "retreat; go east" or "ret;e". Quoted speech and the
+// SAY verb are exempt (matches isQuoteSpeech/isSayVerb in ProcessCommand): a
+// semicolon there is ordinary sentence punctuation, not a command separator,
+// so "'well; that's odd" and "say well; that's odd, isn't it" are each kept
+// whole rather than being chopped at the ';'.
+func splitCommandChain(input string) []string {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return nil
+	}
+	isQuoteSpeech := strings.HasPrefix(trimmed, "'") || strings.HasPrefix(trimmed, "\"")
+	isSayVerb := len(trimmed) >= 3 && strings.EqualFold(trimmed[:3], "say") && (len(trimmed) == 3 || trimmed[3] == ' ')
+	if isQuoteSpeech || isSayVerb || !strings.Contains(trimmed, ";") {
+		return []string{trimmed}
+	}
+	parts := strings.Split(trimmed, ";")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		out = append(out, p)
+		if len(out) >= maxChainedCommands {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return []string{trimmed}
+	}
+	return out
 }
 
 func isExcluded(name string, excludes []string) bool {
@@ -1584,7 +1795,16 @@ func (s *Server) handleCreateCharacter(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "That first name is already taken. Please choose another."})
 		return
 	}
-	player := s.engine.CreateNewPlayer(r.Context(), req.FirstName, req.LastName, req.Race, req.Gender, accountID)
+	appearance := req.appearance()
+	if appearance != nil {
+		if err := engine.ValidateCharacterAppearance(req.Race, req.Gender, appearance); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	player := s.engine.CreateNewPlayer(r.Context(), req.FirstName, req.LastName, req.Race, req.Gender, appearance, accountID)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(player)
 }
@@ -1773,17 +1993,24 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "auth not configured", 500)
 		return
 	}
-	if !s.checkRateLimit(getClientIP(r), "register", 5, time.Minute) {
+	if !s.checkRateLimit(getClientIP(r), "register", 3, time.Hour) {
 		http.Error(w, "too many registration attempts, try again later", 429)
 		return
 	}
 	var req struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-		Name     string `json:"name"`
+		Email        string `json:"email"`
+		Password     string `json:"password"`
+		Name         string `json:"name"`
+		CaptchaToken string `json:"captchaToken"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", 400)
+		return
+	}
+	if err := s.auth.VerifyCaptcha(r.Context(), req.CaptchaToken, getClientIP(r)); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 	account, verifyToken, verifyCode, err := s.auth.RegisterWithPassword(r.Context(), req.Email, req.Password, req.Name)
@@ -2476,17 +2703,46 @@ func (s *Server) handleAdminLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	event := r.URL.Query().Get("event")
 	player := r.URL.Query().Get("player")
+	resolved := r.URL.Query().Get("resolved")
 	limit := 100
 	if l := r.URL.Query().Get("limit"); l != "" {
 		fmt.Sscanf(l, "%d", &limit)
 	}
-	entries, err := s.gamelog.Query(r.Context(), event, player, limit)
+	entries, err := s.gamelog.Query(r.Context(), event, player, resolved, limit)
 	if err != nil {
 		http.Error(w, "failed to query logs", 500)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(entries)
+}
+
+// handleAdminResolveLog marks (or unmarks) a log entry — chiefly a player REPORT
+// — as resolved, so the admin Logs UI can distinguish what still needs work.
+func (s *Server) handleAdminResolveLog(w http.ResponseWriter, r *http.Request) {
+	account := s.requireAdmin(w, r)
+	if account == nil {
+		return
+	}
+	vars := mux.Vars(r)
+	var req struct {
+		Resolved bool `json:"resolved"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", 400)
+		return
+	}
+	resolvedBy := account.Name
+	if resolvedBy == "" {
+		resolvedBy = account.Email
+	}
+	entry, err := s.gamelog.SetResolved(r.Context(), vars["id"], req.Resolved, resolvedBy)
+	if err != nil {
+		http.Error(w, err.Error(), 404)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(entry)
 }
 
 func (s *Server) handleBootstrapAdmin(w http.ResponseWriter, r *http.Request) {

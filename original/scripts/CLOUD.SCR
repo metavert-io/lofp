@@ -435,13 +435,28 @@ You are high above a large cloud, being thrown about be a huge gust of wind.
 *DESCRIPTION_END
 CHANNEL 92
 ASTRAL
-SETEVENT 51 6
+; This room has no EXITs on purpose — the only way out is the timed drop
+; below. That drop was dead code: SETEVENT 51 6 sat here at room-scope, but
+; the engine's room parser only recognizes a specific whitelist of bare
+; top-level actions (ECHO/AFFECT/RANDOM/EQUAL/ADD/SUB/NEWITEM/REMOVEITEM/
+; GENMON/KILLMON/GMMSG/CALLPACK — see parseRoom in scriptparser/parser.go)
+; and silently drops anything else, so this SETEVENT never actually ran.
+; Worse, IFVAR YOUAREHERE > 0 was a sibling of IFENTRY, not nested inside
+; it (GMSCRIPT.DOC's only documented IFENTRY+IFVAR example nests them —
+; see the PathMaster script), and RunEntryScripts only walks IFENTRY blocks
+; at room top level, so that IFVAR (and the CONTEVENT drop sequence inside
+; it) never ran either. Together those two bugs meant players who landed
+; here were stuck forever. Fixed 2026-09-15 per user report by nesting
+; IFVAR inside IFENTRY (so it's reached at all) and moving SETEVENT inside
+; that nesting, right before the countdown it feeds (so it isn't dropped
+; by the room-level whitelist, and its 6-cycle/30s delay is actually set
+; before CONTEVENT reads it).
 VARIABLE YOUAREHERE
 IFENTRY
 	ADD youarehere 1
 	ECHO OTHERS %n flies into the area from the 'ground' below!
-ENDIF
-IFVAR YOUAREHERE > 0
+	SETEVENT 51 6
+	IFVAR YOUAREHERE > 0
 	EQUAL ROUNDTIME 20
 	CONTEVENT 51
 	ECHO OTHERS %N suddenly drops out of sight!
@@ -517,6 +532,7 @@ IFVAR YOUAREHERE > 0
 	GENMON 89
         ECHO ALL Suddenly, a swarm of lightning bugs fill the air!
 	AFFECT 670
+	ENDIF
 ENDIF
 ;
 ;

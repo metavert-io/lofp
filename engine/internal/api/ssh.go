@@ -346,6 +346,7 @@ func (s *Server) handleSSHSession(channel ssh.Channel, remoteAddr string) {
 	}
 	s.mu.Unlock()
 
+	player.RestoreTransientState()
 	session := &Session{
 		Player:       player,
 		Conn:         sc,
@@ -365,7 +366,9 @@ func (s *Server) handleSSHSession(channel ssh.Channel, remoteAddr string) {
 	s.gamelog.Log(gamelog.EventGameEnter, player.FullName(), accountID,
 		fmt.Sprintf("ssh from %s", ip), player.RoomNumber, "")
 
-	if !player.GMInvis && !player.GMHidden {
+	// GMs log in and out frequently for admin work — skip the announcement for
+	// them regardless of GMInvis/GMHidden, not just while actively concealed.
+	if !player.GMInvis && !player.GMHidden && !player.IsGM {
 		s.broadcastGlobal(player.FirstName,
 			[]string{fmt.Sprintf("** %s has just entered the Realms.", player.FirstName)})
 		s.broadcastToRoom(player.RoomNumber, player.FirstName,
@@ -395,13 +398,15 @@ func (s *Server) handleSSHSession(channel ssh.Channel, remoteAddr string) {
 	s.mu.Unlock()
 
 	if isActive {
-		if !player.GMInvis && !player.GMHidden {
+		s.engine.HandlePlayerDisconnect(player)
+		// See the matching entry-side comment above — GMs skip this announcement too.
+		if !player.GMInvis && !player.GMHidden && !player.IsGM {
 			if !session.quitSent {
 				s.broadcastGlobal(player.FirstName,
-					[]string{fmt.Sprintf("** %s has just left the Realms.", player.FirstName)})
+					[]string{fmt.Sprintf("** %s has just left the Realms.", player.DisplayNameCap())})
 			}
 			s.broadcastToRoom(player.RoomNumber, player.FirstName,
-				[]string{fmt.Sprintf("%s fades from the Realms.", player.FirstName)})
+				[]string{fmt.Sprintf("%s fades from the Realms.", player.DisplayNameCap())})
 		}
 		s.gamelog.Log(gamelog.EventGameExit, player.FullName(), accountID,
 			fmt.Sprintf("ssh from %s", ip), player.RoomNumber, "")
@@ -706,8 +711,9 @@ func (s *Server) sshCreateCharacter(sc *sshConn, ctx context.Context, accountID 
 	if err != nil {
 		return nil
 	}
-	var gender int
-	fmt.Sscanf(strings.TrimSpace(genderStr), "%d", &gender)
+	var genderChoice int
+	fmt.Sscanf(strings.TrimSpace(genderStr), "%d", &genderChoice)
+	gender := genderChoice - 1 // displayed 1/2 -> internal GenderMale=0/GenderFemale=1
 
 	if err := engine.ValidateCharacterInput(firstName, lastName, race, gender); err != nil {
 		sc.writeLine(ansiRed + err.Error() + ansiReset)
@@ -719,9 +725,92 @@ func (s *Server) sshCreateCharacter(sc *sshConn, ctx context.Context, accountID 
 		return nil
 	}
 
-	player := s.engine.CreateNewPlayer(ctx, firstName, lastName, race, gender, accountID)
+	appearance := sshRollAndPickAppearance(sc, race, gender)
+	if appearance == nil {
+		return nil
+	}
+
+	player := s.engine.CreateNewPlayer(ctx, firstName, lastName, race, gender, appearance, accountID)
 	sc.writeLine(ansiGreen + fmt.Sprintf("Welcome to the Shattered Realms, %s the %s!", player.FullName(), engine.RaceNameByID(player.Race)) + ansiReset)
+	sc.writeLine(ansiGreen + "Type HELP for a full list of commands, or ADVICE to get some tips for getting started." + ansiReset)
 	return player
+}
+
+// sshRollAndPickAppearance mirrors telnetRollAndPickAppearance for SSH connections.
+func sshRollAndPickAppearance(sc *sshConn, race, gender int) *engine.CharacterAppearance {
+	var appearance *engine.CharacterAppearance
+	sc.writeLine("")
+	for {
+		appearance = engine.RollCharacterAppearance(race, gender)
+		heightFeet := appearance.Height / 12
+		heightInches := appearance.Height % 12
+		sc.writeLine(fmt.Sprintf("Quickness: %-3d  Constitution: %-3d  Strength: %-3d  Agility: %-3d",
+			appearance.Quickness, appearance.Constitution, appearance.Strength, appearance.Agility))
+		sc.writeLine(fmt.Sprintf("Willpower: %-3d  Perception: %-3d  Empathy: %-3d",
+			appearance.Willpower, appearance.Perception, appearance.Empathy))
+		sc.writeLine(fmt.Sprintf("Age: %-3d  Height: %d'%d  Weight: %-3d",
+			appearance.Age, heightFeet, heightInches, appearance.Weight))
+		sc.writePrompt("Reroll these stats? (Y/N): ")
+		answer, err := sc.readLine(time.Minute, true)
+		if err != nil {
+			return nil
+		}
+		if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(answer)), "Y") {
+			break
+		}
+		sc.writeLine("")
+	}
+
+	eyeIdx := sshPickFromList(sc, "Eye color", engine.EyeColors)
+	if eyeIdx < 0 {
+		return nil
+	}
+	appearance.EyeColor = engine.EyeColors[eyeIdx]
+
+	skinIdx := sshPickFromList(sc, "Skin color", engine.SkinColors)
+	if skinIdx < 0 {
+		return nil
+	}
+	appearance.SkinColor = engine.SkinColors[skinIdx]
+
+	styleIdx := sshPickFromList(sc, "Hair style", engine.HairStyles)
+	if styleIdx < 0 {
+		return nil
+	}
+	appearance.HairStyle = engine.HairStyles[styleIdx]
+
+	if appearance.HairStyle == "bald" {
+		appearance.HairColor = ""
+	} else {
+		colorIdx := sshPickFromList(sc, "Hair color", engine.HairColors)
+		if colorIdx < 0 {
+			return nil
+		}
+		appearance.HairColor = engine.HairColors[colorIdx]
+	}
+
+	return appearance
+}
+
+// sshPickFromList mirrors telnetPickFromList for SSH connections.
+func sshPickFromList(sc *sshConn, label string, options []string) int {
+	sc.writeLine("")
+	sc.writeLine(label + ":")
+	for i, opt := range options {
+		sc.writeLine(fmt.Sprintf("  %2d) %s", i+1, opt))
+	}
+	for {
+		sc.writePrompt(fmt.Sprintf("%s (1-%d): ", label, len(options)))
+		line, err := sc.readLine(time.Minute, true)
+		if err != nil {
+			return -1
+		}
+		var choice int
+		if _, err := fmt.Sscanf(strings.TrimSpace(line), "%d", &choice); err == nil && choice >= 1 && choice <= len(options) {
+			return choice - 1
+		}
+		sc.writeLine(ansiRed + "Invalid choice." + ansiReset)
+	}
 }
 
 func (s *Server) sshCommandLoop(ctx context.Context, session *Session, sc *sshConn) {
@@ -741,55 +830,63 @@ func (s *Server) sshCommandLoop(ctx context.Context, session *Session, sc *sshCo
 		session.lastActivity = time.Now()
 
 		// Rate limiting (same as telnet)
-		now := time.Now()
-		if now.Sub(session.lastCmdTime) > time.Second {
-			session.cmdCount = 0
-			session.lastCmdTime = now
-		}
-		session.cmdCount++
-		if session.cmdCount > 4 {
-			sc.writeLine("[Slow down! Too many commands.]")
-			continue
-		}
-
-		cutoff := now.Add(-10 * time.Second)
-		var recentCmds []time.Time
-		for _, t := range session.cmdTimes {
-			if t.After(cutoff) {
-				recentCmds = append(recentCmds, t)
+		quit := false
+		for _, subInput := range splitCommandChain(input) {
+			now := time.Now()
+			isGive := strings.HasPrefix(strings.ToLower(subInput), "give ")
+			if now.Sub(session.lastCmdTime) > time.Second {
+				session.cmdCount = 0
+				session.lastCmdTime = now
 			}
-		}
-		session.cmdTimes = append(recentCmds, now)
-		if len(session.cmdTimes) > 10 {
-			sc.writeLine("[Slow down! Too many commands.]")
-			continue
-		}
+			session.cmdCount++
+			if !session.Player.IsGM && !isGive && session.cmdCount > 8 {
+				sc.writeLine("[Slow down! Too many commands.]")
+				break
+			}
 
-		result := s.engine.ProcessCommand(ctx, session.Player, input)
-		result.PlayerState = session.Player
-		result.PromptIndicators = session.Player.PromptIndicators()
-		s.sendResult(session, result)
-
-		if len(result.RoomBroadcast) > 0 {
-			chatNow := time.Now()
-			chatCutoff := chatNow.Add(-10 * time.Second)
-			var recent []time.Time
-			for _, t := range session.chatTimes {
-				if t.After(chatCutoff) {
-					recent = append(recent, t)
+			cutoff := now.Add(-10 * time.Second)
+			var recentCmds []time.Time
+			for _, t := range session.cmdTimes {
+				if t.After(cutoff) {
+					recentCmds = append(recentCmds, t)
 				}
 			}
-			session.chatTimes = recent
-			if len(session.chatTimes) >= 5 {
-				sc.writeLine("[You are sending messages too quickly. Please wait.]")
-				continue
+			session.cmdTimes = append(recentCmds, now)
+			if !session.Player.IsGM && !isGive && len(session.cmdTimes) > 20 {
+				sc.writeLine("[Slow down! Too many commands.]")
+				break
 			}
-			session.chatTimes = append(session.chatTimes, chatNow)
+
+			result := s.engine.ProcessCommand(ctx, session.Player, subInput)
+			result.PlayerState = session.Player
+			result.PromptIndicators = session.Player.PromptIndicators()
+			s.sendResult(session, result)
+
+			if len(result.RoomBroadcast) > 0 {
+				chatNow := time.Now()
+				chatCutoff := chatNow.Add(-9 * time.Second)
+				var recent []time.Time
+				for _, t := range session.chatTimes {
+					if t.After(chatCutoff) {
+						recent = append(recent, t)
+					}
+				}
+				session.chatTimes = recent
+				if len(session.chatTimes) >= 10 {
+					sc.writeLine("[You are sending messages too quickly. Please wait.]")
+					break
+				}
+				session.chatTimes = append(session.chatTimes, chatNow)
+			}
+
+			s.dispatchCommandResult(session, result)
+
+			if result.Quit {
+				quit = true
+				break
+			}
 		}
-
-		s.dispatchCommandResult(session, result)
-
-		if result.Quit {
+		if quit {
 			return
 		}
 	}

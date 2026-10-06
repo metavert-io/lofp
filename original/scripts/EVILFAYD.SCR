@@ -6,15 +6,24 @@ VARIABLE ICDUMMY3
 VARIABLE MALBROKEN
 ; If Malthesia's statue is broken
 ;
+; Shared by room 1070 (City Wall) via MONSTERGROUP 91, spawn-checked on the
+; shared global cooldown (~20-30s, see spawnCheckCooldown/respawnNearPlayers in
+; monsters.go — that timer stays untouched, same reasoning as the Black Tower/
+; Underkeep fixes). These nine probabilities used to sum to 204%, with spectral
+; lord and rakshasha alone at 94% and 68% per check — a fast, dangerous undead
+; pair capable of respawning almost every cooldown tick. Halved down to ~104%
+; combined 2026-09-15 per user report; the three 1%-chance unique spawns
+; (soldier/citizen/ghoul) are left at 1 since halving would zero them out
+; entirely rather than just slow them down. Caps left at 9/3/1/2/2/3/3/3/2.
 MLIST 91 374 1 9        ; soldier
 MLIST 91 375 1 3        ; citizen
 MLIST 91 24  1 1        ; ghoul
-MLIST 91 182 9 2        ; greater skeleton
-MLIST 91 184 12 2        ; zovembie
-MLIST 91 185 94 3       ; spectral lord
-MLIST 91 186 68 3       ; rakshasha
-MLIST 91 187 12 3        ; inseivax
-MLIST 91 183 6 2        ; greater ghoul
+MLIST 91 182 5 2        ; greater skeleton
+MLIST 91 184 6 2        ; zovembie
+MLIST 91 185 47 3       ; spectral lord
+MLIST 91 186 34 3       ; rakshasha
+MLIST 91 187 6 3        ; inseivax
+MLIST 91 183 3 2        ; greater ghoul
 ; Generate soldiers, citizens
 ;
 CEVENT 57 0 1078

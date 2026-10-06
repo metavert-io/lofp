@@ -1744,6 +1744,7 @@ gaze  glare  scowl  furrow (brow)  sing  recite  pace  comfort`}</pre>
 230  Disjunction                   Lev 21
 231  Imprison                      Lev 19
 232  Mist Form                     Lev 20
+233  Disenchant                    Lev 27
 234  Spell Shield                  Lev 13
 235  Cloak Mind                    Lev 22
 243  Charge Wand                   Lev 26
