@@ -68,6 +68,8 @@ func main() {
 		ForageDefs:           result.ForageDefs,
 		MineDefs:             result.MineDefs,
 		BreakMods:            result.BreakMods,
+		BodyPartDefs:         result.BodyPartDefs,
+		BodyTypeDefs:         result.BodyTypeDefs,
 		StartRoom:            result.StartRoom,
 		BumpRoom:             result.BumpRoom,
 	}
@@ -102,17 +104,19 @@ func main() {
 			return nil, err
 		}
 		return &gameworld.ParsedData{
-			Rooms:       r.Rooms,
-			Items:       r.Items,
-			Monsters:    r.Monsters,
-			Nouns:       r.Nouns,
-			Adjectives:  r.Adjectives,
-			MonsterAdjs: r.MonsterAdjs,
-			Variables:   r.Variables,
-			CEvents:     r.CEvents,
-			ForageDefs:  r.ForageDefs,
-			MineDefs:    r.MineDefs,
-			BreakMods:   r.BreakMods,
+			Rooms:        r.Rooms,
+			Items:        r.Items,
+			Monsters:     r.Monsters,
+			Nouns:        r.Nouns,
+			Adjectives:   r.Adjectives,
+			MonsterAdjs:  r.MonsterAdjs,
+			Variables:    r.Variables,
+			CEvents:      r.CEvents,
+			ForageDefs:   r.ForageDefs,
+			MineDefs:     r.MineDefs,
+			BreakMods:    r.BreakMods,
+			BodyPartDefs: r.BodyPartDefs,
+			BodyTypeDefs: r.BodyTypeDefs,
 		}, nil
 	}
 

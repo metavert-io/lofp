@@ -1686,7 +1686,14 @@ func (e *GameEngine) releaseMonsterSpell(inst *MonsterInstance, def *gameworld.M
 		player.BodyPoints = 0
 	}
 
-	part := randomBodyPart("HUMAN")
+	bodytype := "HUMAN"
+
+	if player.WolfForm {
+		bodytype = "ANIMAL"
+	}
+
+	part := randomBodyPart(bodytype, nil, e.bodyPartDefs, e.bodyTypeDefs)
+
 	severity := damageSeverity(dmg)
 
 	damageNoun := "blast"
@@ -1715,7 +1722,7 @@ func (e *GameEngine) releaseMonsterSpell(inst *MonsterInstance, def *gameworld.M
 			"%s %s to %s. [%d Damage]",
 			severity,
 			damageNoun,
-			part,
+			part.Name,
 			dmg,
 		),
 	)

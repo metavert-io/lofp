@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"math"
 	"math/rand"
 	"strconv"
 	"strings"
@@ -465,30 +466,32 @@ func calcToHit(attackRating, defenseRating int) int {
 func playerAttackRating(player *Player, weaponDef *gameworld.ItemDef, offhand bool) int {
 	rating := 50
 	rating += player.Level * 3
+	/*
+		clawGrowth := player.EffectiveStat(ClawGrowth)
 
-	clawGrowth := player.EffectiveStat(ClawGrowth)
+		if weaponDef != nil {
+			skillID := weaponSkillForType(weaponDef.Type)
+			weaponSkill := player.Skills[skillID]
 
-	if weaponDef != nil {
-		skillID := weaponSkillForType(weaponDef.Type)
-		weaponSkill := player.Skills[skillID]
+			// Secondary weapon skill is limited by Two Weapons skill.
+			if offhand {
+				twoWeaponSkill := player.Skills[1]
 
-		// Secondary weapon skill is limited by Two Weapons skill.
-		if offhand {
-			twoWeaponSkill := player.Skills[1]
-
-			if twoWeaponSkill < weaponSkill {
-				weaponSkill = twoWeaponSkill
+				if twoWeaponSkill < weaponSkill {
+					weaponSkill = twoWeaponSkill
+				}
 			}
-		}
 
-		rating += weaponSkill * 5
-	} else if player.WolfForm || clawGrowth > 0 {
-		// Wolfling natural weapons
-		rating += player.Skills[4] * 5
-	} else {
-		// Normal unarmed combat
-		rating += player.Skills[24] * 5
-	}
+			rating += weaponSkill * 5
+		} else if player.WolfForm || clawGrowth > 0 {
+			// Wolfling natural weapons
+			rating += player.Skills[4] * 5
+		} else {
+			// Normal unarmed combat
+			rating += player.Skills[24] * 5
+		}  */
+
+	rating += playerAttackSkillLevel(player, weaponDef, offhand) * 5
 
 	if weaponDef != nil &&
 		(weaponDef.Type == "BOW_WEAPON" ||
@@ -520,6 +523,30 @@ func playerAttackRating(player *Player, weaponDef *gameworld.ItemDef, offhand bo
 	}
 
 	return rating
+}
+
+func playerAttackSkillLevel(player *Player, weaponDef *gameworld.ItemDef, offhand bool) int {
+	clawGrowth := player.EffectiveStat(ClawGrowth)
+
+	if weaponDef != nil {
+		skillID := weaponSkillForType(weaponDef.Type)
+		weaponSkill := player.Skills[skillID]
+
+		if offhand {
+			twoWeaponSkill := player.Skills[1]
+			if twoWeaponSkill < weaponSkill {
+				weaponSkill = twoWeaponSkill
+			}
+		}
+
+		return weaponSkill
+	}
+
+	if player.WolfForm || clawGrowth > 0 {
+		return player.Skills[4]
+	}
+
+	return player.Skills[24]
 }
 
 func (e *GameEngine) playerDefenseRating(player *Player) int {
@@ -586,15 +613,15 @@ func playerDamage(player *Player, weaponDef *gameworld.ItemDef) int {
 		if player.WolfForm || clawGrowth > 0 {
 			// Wolf form + Claw Growth gets enhanced claws.
 			if player.WolfForm && clawGrowth > 0 {
-				return rand.Intn(9) + clawGrowth + player.EffectiveStat(StatStrength)/10
+				return rand.Intn(9) + clawGrowth
 			}
 			// Normal claws.
-			return rand.Intn(8) + 3 + player.EffectiveStat(StatStrength)/10
+			return rand.Intn(8) + 3
 		}
 
 		// Martial Arts: +1 base damage per rank, +1 max damage per 2 ranks
 		maSkill := player.Skills[24]
-		baseDmg := rand.Intn(3+maSkill/2) + 1 + maSkill + player.EffectiveStat(StatStrength)/20
+		baseDmg := rand.Intn(3+maSkill/2) + 1 + maSkill
 		return baseDmg
 	}
 	maxDmg := weaponDef.Parameter1
@@ -602,11 +629,7 @@ func playerDamage(player *Player, weaponDef *gameworld.ItemDef) int {
 		maxDmg = 3
 	}
 	dmg := rand.Intn(maxDmg) + 1
-	if weaponDef.Type == "BOW_WEAPON" || weaponDef.Type == "THROWN_WEAPON" {
-		dmg += player.EffectiveStat(StatAgility) / 10
-	} else {
-		dmg += player.EffectiveStat(StatStrength) / 10
-	}
+
 	if player.Stance == StanceBerserk {
 		dmg = dmg * 12 / 10
 	}
@@ -625,7 +648,7 @@ func dancingWeaponDamage(player *Player, spell *SpellDef) int {
 	}
 
 	dmg := rand.Intn(maxDmg) + 1
-	dmg += player.EffectiveStat(StatEmpathy) / 10
+	dmg += player.EffectiveStat(StatEmpathy) / 20
 
 	return dmg
 }
@@ -799,16 +822,71 @@ func (e *GameEngine) checkMagicWeapon(player *Player, wielded *InventoryItem, we
 	return true
 }
 
-// ---- Body parts ----
+func randomBodyPart(
+	bodyType string,
+	monsterParts []int,
+	partDefs map[int]*gameworld.BodyPartDef,
+	typeDefs map[string]*gameworld.BodyTypeDef,
+) *gameworld.BodyPartDef {
 
-var bodyParts = []string{"head", "body", "right arm", "left arm", "right leg", "left leg", "back"}
-var animalParts = []string{"head", "body", "right foreleg", "left foreleg", "right hind leg", "left hind leg", "tail"}
+	var ids []int
 
-func randomBodyPart(bodyType string) string {
-	if bodyType == "ANIMAL" || bodyType == "AVINE" {
-		return animalParts[rand.Intn(len(animalParts))]
+	// Add standard anatomy for this body type.
+	if def, ok := typeDefs[strings.ToUpper(bodyType)]; ok {
+		ids = append(ids, def.Parts...)
 	}
-	return bodyParts[rand.Intn(len(bodyParts))]
+
+	// Add monster-specific body parts.
+	ids = append(ids, monsterParts...)
+
+	// Resolve IDs into actual body part definitions.
+	var parts []*gameworld.BodyPartDef
+	totalWeight := 0
+
+	for _, id := range ids {
+		if def, ok := partDefs[id]; ok {
+			parts = append(parts, def)
+
+			weight := def.Weight
+			if weight <= 0 {
+				weight = 1
+			}
+
+			totalWeight += weight
+		}
+	}
+
+	// Default to Body when no anatomy is defined.
+	if len(parts) == 0 {
+		if def, ok := partDefs[1]; ok {
+			return def
+		}
+
+		return &gameworld.BodyPartDef{
+			ID:             1,
+			Name:           "Body",
+			DamageCategory: "CORE",
+			Weight:         50,
+		}
+	}
+
+	// Select a body part using its relative weight.
+	roll := rand.Intn(totalWeight)
+
+	for _, part := range parts {
+		weight := part.Weight
+		if weight <= 0 {
+			weight = 1
+		}
+
+		if roll < weight {
+			return part
+		}
+
+		roll -= weight
+	}
+
+	return parts[len(parts)-1]
 }
 
 // ---- Weapon helpers ----
@@ -1402,6 +1480,7 @@ func (e *GameEngine) resolvePlayerWeaponAttack(player *Player, inst *MonsterInst
 	article := articleFor(name, def.Unique)
 
 	var weaponDef *gameworld.ItemDef
+	//var bodyPartDef *gameworld.BodyPartDef
 
 	if weapon != nil {
 		weaponDef = e.items[weapon.Archetype]
@@ -1521,17 +1600,27 @@ func (e *GameEngine) resolvePlayerWeaponAttack(player *Player, inst *MonsterInst
 		weaponDef != nil &&
 		len(def.Weapons) > 0 {
 
-		weaponStr :=
-			weaponDef.Weight*3 +
-				weaponDef.Parameter1*2
+		// Legacy weapon strength:
+		//
+		// Lower values mean the weapon is harder to damage.
+		// Weapon power and positive BREAKMOD values make the
+		// weapon stronger by lowering its break threshold.
+		//
+		// Example:
+		//   Randar longsword:
+		//     30 - 8 (PARAMETER1) - 16 (randar) = 6
+		weaponStr := 30 - weaponDef.Parameter1
 
-		// Apply legacy BREAKMOD from all weapon adjectives.
 		if weapon != nil {
-			breakMod := e.itemBreakMod(weapon)
+			weaponStr -= e.itemBreakMod(weapon)
+		}
 
-			if breakMod != 0 {
-				weaponStr = weaponStr * (100 + breakMod) / 100
-			}
+		// Every weapon must remain breakable.
+		// Since 2d100 has a minimum roll of 2 and damage occurs
+		// when the roll is below Strength, 3 is the lowest useful
+		// weapon strength.
+		if weaponStr < 3 {
+			weaponStr = 3
 		}
 
 		clashRoll := rand.Intn(100) + rand.Intn(100) + 2
@@ -1547,42 +1636,42 @@ func (e *GameEngine) resolvePlayerWeaponAttack(player *Player, inst *MonsterInst
 			),
 		)
 
-		if clashRoll > weaponStr {
-			if weapon != nil &&
-				weapon.State == "DAMAGED" {
+		// A weapon that is already damaged breaks on its next clash,
+		// regardless of the strength roll.
+		if weapon != nil && weapon.State == "DAMAGED" {
+			msgs = append(
+				msgs,
+				fmt.Sprintf(
+					" Your %s breaks!",
+					strings.ToLower(
+						e.nouns[weaponDef.NameID],
+					),
+				),
+			)
 
-				msgs = append(
-					msgs,
-					fmt.Sprintf(
-						" Your %s breaks!",
+			// Clear the correct hand.
+			if offhand {
+				player.Offhand = nil
+			} else {
+				player.Wielded = nil
+			}
+
+		} else if weapon != nil && clashRoll < weaponStr {
+			// An undamaged weapon that fails its strength roll
+			// becomes damaged.
+			weapon.State = "DAMAGED"
+
+			msgs = append(
+				msgs,
+				fmt.Sprintf(
+					" %s damaged!",
+					strings.Title(
 						strings.ToLower(
 							e.nouns[weaponDef.NameID],
 						),
 					),
-				)
-
-				// Clear the correct hand.
-				if offhand {
-					player.Offhand = nil
-				} else {
-					player.Wielded = nil
-				}
-
-			} else if weapon != nil {
-				weapon.State = "DAMAGED"
-
-				msgs = append(
-					msgs,
-					fmt.Sprintf(
-						" %s damaged!",
-						strings.Title(
-							strings.ToLower(
-								e.nouns[weaponDef.NameID],
-							),
-						),
-					),
-				)
-			}
+				),
+			)
 		}
 
 		result.Messages = msgs
@@ -1621,15 +1710,12 @@ func (e *GameEngine) resolvePlayerWeaponAttack(player *Player, inst *MonsterInst
 		if excellent {
 			bonus := rand.Intn(100) + 1
 
-			openEndedBonus =
-				bonus / 2
+			openEndedBonus = bonus / 2
 
 			if bonus >= 96 {
-				hitLabel =
-					"Devastating Critical!!"
+				hitLabel = "Devastating Critical!!"
 
-				openEndedBonus +=
-					rand.Intn(100)/2 + 50
+				openEndedBonus += rand.Intn(100)/2 + 50
 			}
 		}
 
@@ -1643,11 +1729,48 @@ func (e *GameEngine) resolvePlayerWeaponAttack(player *Player, inst *MonsterInst
 			),
 		)
 
-		dmg :=
-			playerDamage(
-				player,
-				weaponDef,
-			)
+		// Select hit location once.
+		part := randomBodyPart(
+			def.BodyType,
+			def.BodyParts,
+			e.bodyPartDefs,
+			e.bodyTypeDefs,
+		)
+
+		// First damage roll.
+		firstRoll := playerDamage(player, weaponDef)
+		secondRoll := 0
+
+		// CORE locations get a second independent damage roll.
+		if strings.EqualFold(part.DamageCategory, "CORE") {
+			secondRoll = playerDamage(player, weaponDef)
+		}
+
+		// Combine independent damage rolls.
+		rolledDamage := firstRoll + secondRoll
+
+		statBonus := 0
+
+		if weaponDef != nil &&
+			(weaponDef.Type == "BOW_WEAPON" || weaponDef.Type == "THROWN_WEAPON") {
+
+			statBonus = player.EffectiveStat(StatAgility) / 20
+
+		} else {
+			statBonus = player.EffectiveStat(StatStrength) / 20
+		}
+
+		dmg := rolledDamage + statBonus
+
+		// Weapon skill adds +1 damage per 5 levels.
+		skillLevel := playerAttackSkillLevel(player, weaponDef, offhand)
+		skillBonus := skillLevel / 5
+
+		dmg += skillBonus
+
+		if strings.EqualFold(part.DamageCategory, "HAND") {
+			dmg = int(math.Round(float64(dmg) * 0.5))
+		}
 
 		if openEndedBonus > 0 {
 			dmg = dmg * (100 + openEndedBonus) / 100
@@ -1677,14 +1800,15 @@ func (e *GameEngine) resolvePlayerWeaponAttack(player *Player, inst *MonsterInst
 		if dmg <= 0 {
 			dmg = 1
 		}
-
-		part :=
-			randomBodyPart(
-				def.BodyType,
-			)
-
-		severity :=
-			damageSeverity(dmg)
+		/*
+			msgs = append(msgs, fmt.Sprintf(
+				" [BodyPart: %s | Category: %s | Rolls: %d + %d | Stat: +%d | Skill: %d (+%d) | Final Damage: %d]",
+				part.Name, part.DamageCategory,
+				firstRoll, secondRoll, statBonus,
+				skillLevel, skillBonus, dmg,
+			))
+		*/
+		severity := damageSeverity(dmg)
 
 		msgs = append(
 			msgs,
@@ -1692,7 +1816,7 @@ func (e *GameEngine) resolvePlayerWeaponAttack(player *Player, inst *MonsterInst
 				" %s %s to %s. [%d Damage]",
 				severity,
 				dmgNoun,
-				part,
+				part.Name,
 				dmg,
 			),
 		)
@@ -1710,15 +1834,11 @@ func (e *GameEngine) resolvePlayerWeaponAttack(player *Player, inst *MonsterInst
 
 			dmg += critDmg
 
-			critPart :=
-				randomBodyPart(
-					def.BodyType,
-				)
+			critPart := randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs)
 
-			critSeverity :=
-				damageSeverity(
-					critDmg,
-				)
+			critSeverity := damageSeverity(
+				critDmg,
+			)
 
 			weaponNoun :=
 				strings.ToLower(
@@ -1740,7 +1860,7 @@ func (e *GameEngine) resolvePlayerWeaponAttack(player *Player, inst *MonsterInst
 					fmt.Sprintf(
 						" %s burn to %s. [%d Damage]",
 						critSeverity,
-						critPart,
+						critPart.Name,
 						critDmg,
 					),
 				)
@@ -1759,7 +1879,7 @@ func (e *GameEngine) resolvePlayerWeaponAttack(player *Player, inst *MonsterInst
 					fmt.Sprintf(
 						" %s freeze to %s. [%d Damage]",
 						critSeverity,
-						critPart,
+						critPart.Name,
 						critDmg,
 					),
 				)
@@ -1778,7 +1898,7 @@ func (e *GameEngine) resolvePlayerWeaponAttack(player *Player, inst *MonsterInst
 					fmt.Sprintf(
 						" %s shock to %s. [%d Damage]",
 						critSeverity,
-						critPart,
+						critPart.Name,
 						critDmg,
 					),
 				)
@@ -1794,7 +1914,7 @@ func (e *GameEngine) resolvePlayerWeaponAttack(player *Player, inst *MonsterInst
 					fmt.Sprintf(
 						" %s strike to %s. [%d Damage]",
 						critSeverity,
-						critPart,
+						critPart.Name,
 						critDmg,
 					),
 				)
@@ -2290,7 +2410,13 @@ func (e *GameEngine) monsterAttackPlayer(inst *MonsterInstance, def *gameworld.M
 				}
 			}
 
-			part := randomBodyPart("HUMAN")
+			bodytype := "HUMAN"
+
+			if player.WolfForm {
+				bodytype = "ANIMAL"
+			}
+
+			part := randomBodyPart(bodytype, nil, e.bodyPartDefs, e.bodyTypeDefs)
 			severity := damageSeverity(specDmg)
 
 			// ----------------------------------------------------
@@ -2355,7 +2481,7 @@ func (e *GameEngine) monsterAttackPlayer(inst *MonsterInstance, def *gameworld.M
 				fmt.Sprintf(
 					" %s burn to %s. [%d Damage]",
 					severity,
-					part,
+					part.Name,
 					specDmg,
 				),
 			)
@@ -2524,8 +2650,14 @@ func (e *GameEngine) monsterAttackPlayer(inst *MonsterInstance, def *gameworld.M
 		if dmg <= 0 {
 			dmg = 1
 		}
+		bodytype := "HUMAN"
 
-		part := randomBodyPart("HUMAN")
+		if player.WolfForm {
+			bodytype = "ANIMAL"
+		}
+
+		part := randomBodyPart(bodytype, nil, e.bodyPartDefs, e.bodyTypeDefs)
+
 		severity := damageSeverity(dmg)
 
 		// --------------------------------------------------------
@@ -2590,7 +2722,7 @@ func (e *GameEngine) monsterAttackPlayer(inst *MonsterInstance, def *gameworld.M
 				" %s %s to %s. [%d Damage]",
 				severity,
 				monDmgNoun,
-				part,
+				part.Name,
 				dmg,
 			),
 		)

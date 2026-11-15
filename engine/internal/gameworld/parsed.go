@@ -15,6 +15,8 @@ type ParsedData struct {
 	SeasonalMonsterLists map[string][]MonsterList // "PSCRIPT"/"SSCRIPT"/"ASCRIPT"/"WSCRIPT" -> seasonal MLISTs
 	SeasonalRooms        map[string][]Room        // seasonal room description overrides
 	SeasonalForageDefs   map[string][]ForageDef   // seasonal room description overrides
+	BodyPartDefs         []BodyPartDef
+	BodyTypeDefs         []BodyTypeDef
 	CEvents              []CEvent
 	MoneyDefs            []MoneyDef
 	ForageDefs           []ForageDef

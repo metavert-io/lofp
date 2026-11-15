@@ -106,7 +106,7 @@ DAY_LIGHT
 NUMBER 115
 CALL 33
 NAME Grymwood, glade beginning
-*DESCRIPTION_START WINTER
+*DESCRIPTION_START 
 Stepping into the forest places you into another world. Thin, wiry branches wave in occasional gusts of wind off the frosty slopes of the Teeth of Shartan. Through the cold air cuts the cawing of a scavenger bird, searching among the somnolent trees for the leavings of a predator.
 *DESCRIPTION_END
 EXIT W 111

@@ -25,6 +25,8 @@ type ParseResult struct {
 	MonsterLists         []gameworld.MonsterList
 	SeasonalMonsterLists map[string][]gameworld.MonsterList
 	SeasonalRooms        map[string][]gameworld.Room
+	BodyPartDefs         []gameworld.BodyPartDef
+	BodyTypeDefs         []gameworld.BodyTypeDef
 	CEvents              []gameworld.CEvent
 	MoneyDefs            []gameworld.MoneyDef
 	ForageDefs           []gameworld.ForageDef
@@ -369,6 +371,44 @@ func (p *fileParser) parse() {
 				})
 			}
 			p.pos++
+
+		case "BODYPARTDEF":
+			if len(fields) >= 5 {
+				id, err1 := strconv.Atoi(fields[1])
+				weight, err2 := strconv.Atoi(fields[3])
+
+				if err1 == nil && err2 == nil && weight > 0 {
+					def := gameworld.BodyPartDef{
+						ID:             id,
+						DamageCategory: strings.ToUpper(fields[2]),
+						Weight:         weight,
+						Name:           strings.Join(fields[4:], " "),
+					}
+
+					p.result.BodyPartDefs = append(
+						p.result.BodyPartDefs,
+						def,
+					)
+				}
+			}
+			p.pos++
+
+		case "BODYTYPEDEF":
+			if len(fields) >= 3 {
+				def := gameworld.BodyTypeDef{
+					Name: strings.ToUpper(fields[1]),
+				}
+
+				for _, field := range fields[2:] {
+					if id, err := strconv.Atoi(field); err == nil {
+						def.Parts = append(def.Parts, id)
+					}
+				}
+
+				p.result.BodyTypeDefs = append(p.result.BodyTypeDefs, def)
+			}
+			p.pos++
+
 		case "BREAKMOD":
 			if len(fields) >= 3 {
 				adjNum, _ := strconv.Atoi(fields[1])
@@ -496,6 +536,8 @@ func (p *fileParser) parseRoom(fields []string) {
 			cmd == "REGIONDEF" ||
 			cmd == "FORAGEDEF" ||
 			cmd == "MINEDEF" ||
+			cmd == "BODYPARTDEF" ||
+			cmd == "BODYTYPEDEF" ||
 			cmd == "MLIST" ||
 			cmd == "MONEYDEF" ||
 			cmd == "NOUNDEF" ||
@@ -672,6 +714,8 @@ func (p *fileParser) parseItem(fields []string) {
 			cmd == "REGIONDEF" ||
 			cmd == "FORAGEDEF" ||
 			cmd == "MINEDEF" ||
+			cmd == "BODYPARTDEF" ||
+			cmd == "BODYTYPEDEF" ||
 			cmd == "MLIST" ||
 			cmd == "MONEYDEF" ||
 			cmd == "NOUNDEF" ||
@@ -827,6 +871,8 @@ func (p *fileParser) parseMonster(fields []string) {
 			cmd == "MLIST" ||
 			cmd == "MONEYDEF" ||
 			cmd == "FORAGEDEF" ||
+			cmd == "BODYPARTDEF" ||
+			cmd == "BODYTYPEDEF" ||
 			cmd == "MINEDEF" {
 			break
 		}
@@ -845,6 +891,12 @@ func (p *fileParser) parseMonster(fields []string) {
 		case "BODY":
 			if len(fields) >= 2 {
 				mon.Body, _ = strconv.Atoi(fields[1])
+			}
+		case "PART":
+			if len(fields) >= 2 {
+				if partID, err := strconv.Atoi(fields[1]); err == nil {
+					mon.BodyParts = append(mon.BodyParts, partID)
+				}
 			}
 		case "ATTACK1":
 			if len(fields) >= 2 {

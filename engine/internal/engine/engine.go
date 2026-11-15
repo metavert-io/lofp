@@ -168,6 +168,8 @@ type GameEngine struct {
 	seasonalForageDefs   map[string][]gameworld.ForageDef // per-season forage values
 	mineDefs             []gameworld.MineDef              //MINING definitions GEMS AND MINERALS
 	breakMods            []gameworld.BreakModDef
+	bodyPartDefs         map[int]*gameworld.BodyPartDef
+	bodyTypeDefs         map[string]*gameworld.BodyTypeDef
 	PVals                map[int]int     // persistent global values
 	NamedVars            map[string]int  // VARIABLE-defined global named variables (DANWATER, etc.)
 	namedVarNames        map[string]bool // set of valid named variable names
@@ -420,6 +422,14 @@ func (e *GameEngine) ApplyParsedData(parsed *gameworld.ParsedData) ScriptApplySt
 		e.monsters[parsed.Monsters[i].Number] = &parsed.Monsters[i]
 		stats.Monsters++
 	}
+	for i := range parsed.BodyPartDefs {
+		e.bodyPartDefs[parsed.BodyPartDefs[i].ID] = &parsed.BodyPartDefs[i]
+	}
+
+	for i := range parsed.BodyTypeDefs {
+		e.bodyTypeDefs[parsed.BodyTypeDefs[i].Name] = &parsed.BodyTypeDefs[i]
+	}
+
 	for i := range parsed.Nouns {
 		e.nouns[parsed.Nouns[i].ID] = parsed.Nouns[i].Name
 		stats.Nouns++
@@ -516,16 +526,18 @@ func (e *GameEngine) ApplyRoomChange(change RoomChange) {
 // NewGameEngine creates an engine with lookups from parsed data.
 func NewGameEngine(db *mongo.Database, parsed *gameworld.ParsedData) *GameEngine {
 	e := &GameEngine{
-		db:         db,
-		nouns:      make(map[int]string),
-		adjectives: make(map[int]string),
-		monAdjs:    make(map[int]string),
-		items:      make(map[int]*gameworld.ItemDef),
-		traits:     make(map[string]*gameworld.TraitDef),
-		rooms:      make(map[int]*gameworld.Room),
-		monsters:   make(map[int]*gameworld.MonsterDef),
-		startRoom:  parsed.StartRoom,
-		departRoom: parsed.BumpRoom,
+		db:           db,
+		nouns:        make(map[int]string),
+		adjectives:   make(map[int]string),
+		monAdjs:      make(map[int]string),
+		items:        make(map[int]*gameworld.ItemDef),
+		traits:       make(map[string]*gameworld.TraitDef),
+		rooms:        make(map[int]*gameworld.Room),
+		monsters:     make(map[int]*gameworld.MonsterDef),
+		bodyPartDefs: make(map[int]*gameworld.BodyPartDef),
+		bodyTypeDefs: make(map[string]*gameworld.BodyTypeDef),
+		startRoom:    parsed.StartRoom,
+		departRoom:   parsed.BumpRoom,
 	}
 	for i := range parsed.Nouns {
 		e.nouns[parsed.Nouns[i].ID] = parsed.Nouns[i].Name
@@ -548,6 +560,13 @@ func NewGameEngine(db *mongo.Database, parsed *gameworld.ParsedData) *GameEngine
 	}
 	for i := range parsed.Monsters {
 		e.monsters[parsed.Monsters[i].Number] = &parsed.Monsters[i]
+	}
+	for i := range parsed.BodyPartDefs {
+		e.bodyPartDefs[parsed.BodyPartDefs[i].ID] = &parsed.BodyPartDefs[i]
+	}
+
+	for i := range parsed.BodyTypeDefs {
+		e.bodyTypeDefs[parsed.BodyTypeDefs[i].Name] = &parsed.BodyTypeDefs[i]
 	}
 
 	// Load forage definitions
