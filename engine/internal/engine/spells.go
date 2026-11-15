@@ -152,7 +152,7 @@ func init() {
 		{ID: 519, Name: "Sunray", School: "Druidic", Level: 13, ManaCost: 18, CastTime: 3, Effect: "damage", DmgMin: 12, DmgMax: 35, DmgType: "heat"},
 		{ID: 520, Name: "Night Vision", School: "Druidic", Level: 1, ManaCost: 2, CastTime: 2, Effect: "buff", Duration: 45 * time.Minute, Family: "nightvision", StatusType: NightVisionBuff, StatusMsg: "Your eyes adjust to the darkness."},
 		{ID: 521, Name: "Camouflage", School: "Druidic", Level: 7, ManaCost: 8, CastTime: 3, Effect: "buff", Duration: 45 * time.Minute},
-		{ID: 523, Name: "Earth Spike", School: "Druidic", Level: 5, ManaCost: 7, CastTime: 3, Effect: "damage", DmgMin: 5, DmgMax: 18, DmgType: "crushing", StatusMsg: "A jagged spike of earth erupts beneath %s, impaling it!"},
+		{ID: 523, Name: "Earth Spike", School: "Druidic", Level: 5, ManaCost: 7, CastTime: 3, Effect: "damage", DmgMin: 5, DmgMax: 18, DmgType: "crushing", StatusMsg: "%s Gestures and a jagged spike of earth erupts beneath %s, impaling it!"},
 		{ID: 524, Name: "Earth Wave", School: "Druidic", Level: 12, ManaCost: 16, CastTime: 3, Effect: "damage", DmgMin: 10, DmgMax: 30, DmgType: "crushing", StatusMsg: "The ground shakes violently as a wave of earth crashes down on %s!"},
 	}
 
@@ -1832,7 +1832,7 @@ func (e *GameEngine) castDamageSpell(player *Player, spell *SpellDef, args []str
 		"%s %s to %s. [%d Damage]",
 		damageSeverity(dmg),
 		spellDmgNoun(spell.DmgType),
-		randomBodyPart(def.BodyType),
+		randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs).Name,
 		dmg,
 	)
 
@@ -1843,7 +1843,7 @@ func (e *GameEngine) castDamageSpell(player *Player, spell *SpellDef, args []str
 		flavorDmg = fmt.Sprintf(
 			"%s slash to %s. [%d Damage]",
 			damageSeverity(dmg),
-			randomBodyPart(def.BodyType),
+			randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs).Name,
 			dmg,
 		)
 
@@ -1858,7 +1858,7 @@ func (e *GameEngine) castDamageSpell(player *Player, spell *SpellDef, args []str
 		flavorDmg = fmt.Sprintf(
 			"%s burn to %s. [%d Damage]",
 			damageSeverity(dmg),
-			randomBodyPart(def.BodyType),
+			randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs).Name,
 			dmg,
 		)
 
@@ -1873,7 +1873,7 @@ func (e *GameEngine) castDamageSpell(player *Player, spell *SpellDef, args []str
 		flavorDmg = fmt.Sprintf(
 			"%s blast to %s. [%d Damage]",
 			damageSeverity(dmg),
-			randomBodyPart(def.BodyType),
+			randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs).Name,
 			dmg,
 		)
 
@@ -1888,7 +1888,7 @@ func (e *GameEngine) castDamageSpell(player *Player, spell *SpellDef, args []str
 		flavorDmg = fmt.Sprintf(
 			"%s shock to %s. [%d Damage]",
 			damageSeverity(dmg),
-			randomBodyPart(def.BodyType),
+			randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs).Name,
 			dmg,
 		)
 
@@ -1903,7 +1903,7 @@ func (e *GameEngine) castDamageSpell(player *Player, spell *SpellDef, args []str
 		flavorDmg = fmt.Sprintf(
 			"%s strike to %s. [%d Damage]",
 			damageSeverity(dmg),
-			randomBodyPart(def.BodyType),
+			randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs).Name,
 			dmg,
 		)
 
@@ -1918,7 +1918,7 @@ func (e *GameEngine) castDamageSpell(player *Player, spell *SpellDef, args []str
 		flavorDmg = fmt.Sprintf(
 			"%s blast to %s. [%d Damage]",
 			damageSeverity(dmg),
-			randomBodyPart(def.BodyType),
+			randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs).Name,
 			dmg,
 		)
 	}

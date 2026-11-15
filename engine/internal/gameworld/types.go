@@ -113,8 +113,9 @@ type MonsterDef struct {
 	Name           string            `bson:"name" json:"name"`
 	Adjective      int               `bson:"adjective" json:"adjective"`
 	Description    string            `bson:"description" json:"description"`
-	BodyType       string            `bson:"bodyType" json:"bodyType"` // HUMAN, ANIMAL, AVINE
-	Body           int               `bson:"body" json:"body"`         // hit points
+	BodyType       string            `bson:"bodyType" json:"bodyType"`   // HUMAN, ANIMAL, AVINE
+	BodyParts      []int             `bson:"bodyParts" json:"bodyParts"` // list of body part IDs
+	Body           int               `bson:"body" json:"body"`           // hit points
 	Attack1        int               `bson:"attack1" json:"attack1"`
 	Attack2        int               `bson:"attack2" json:"attack2"`
 	Defense        int               `bson:"defense" json:"defense"`
@@ -183,6 +184,18 @@ type MonsterWeapon struct {
 	Archetype   int `bson:"archetype" json:"archetype"`
 	Adj         int `bson:"adj" json:"adj"`
 	Probability int `bson:"probability" json:"probability"`
+}
+
+type BodyPartDef struct {
+	ID             int    `bson:"id" json:"id"`
+	Name           string `bson:"name" json:"name"`
+	Weight         int    `bson:"weight" json:"weight"`
+	DamageCategory string `bson:"damageCategory" json:"damageCategory"`
+}
+
+type BodyTypeDef struct {
+	Name  string
+	Parts []int
 }
 
 // CEvent represents a cyclic event that fires periodically.
