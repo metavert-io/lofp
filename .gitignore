@@ -7,4 +7,3 @@ frontend/dist/
 frontend/node_modules/
 *.log
 engine/lofp
-VIBECTL.md
