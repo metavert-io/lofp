@@ -1,5 +1,3 @@
-Read VIBECTL.md for current project status, deployment details, and issue context before starting work.
-
 # LoFP — Legends of Future Past
 
 Resurrecting a 1990s MUD from original script files. The original game engine source code is lost; only the content scripts and documentation survive. We reverse-engineer a working game from those.
@@ -144,7 +142,6 @@ The game world is defined in a custom scripting language (documented in `origina
 - Security: rate limiting, connection caps, chat flood protection, HTML sanitization
 - WebSocket-based real-time multiplayer
 - Admin panel for rooms/items/monsters/players/logs
-- Feedback pipeline: REPORT command forwards to VibeCtl for triage and issue tracking
 - Production: Fly.io (1 machine, ord region) at lofp.metavert.io
   - Single machine to avoid multi-machine state desync (monsters, combat, player visibility)
   - Scale to 2+ machines only after implementing full hub-based monster/combat coordination

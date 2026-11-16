@@ -17,7 +17,6 @@ import (
 	"github.com/metavert-io/lofp/internal/config"
 	"github.com/metavert-io/lofp/internal/email"
 	"github.com/metavert-io/lofp/internal/engine"
-	"github.com/metavert-io/lofp/internal/feedback"
 	"github.com/metavert-io/lofp/internal/gamelog"
 	"github.com/metavert-io/lofp/internal/gameworld"
 	"github.com/metavert-io/lofp/internal/hub"
@@ -50,23 +49,28 @@ func main() {
 
 	// Convert to ParsedData
 	parsed := &gameworld.ParsedData{
-		Rooms:        result.Rooms,
-		Items:        result.Items,
-		Monsters:     result.Monsters,
-		Nouns:        result.Nouns,
-		Adjectives:   result.Adjectives,
-		MonsterAdjs:  result.MonsterAdjs,
-		Variables:    result.Variables,
-		Regions:      result.Regions,
+		Rooms:                result.Rooms,
+		Items:                result.Items,
+		Traits:               result.Traits,
+		Monsters:             result.Monsters,
+		Nouns:                result.Nouns,
+		Adjectives:           result.Adjectives,
+		MonsterAdjs:          result.MonsterAdjs,
+		Variables:            result.Variables,
+		Regions:              result.Regions,
 		MonsterLists:         result.MonsterLists,
 		SeasonalMonsterLists: result.SeasonalMonsterLists,
 		SeasonalRooms:        result.SeasonalRooms,
-		CEvents:      result.CEvents,
-		MoneyDefs:    result.MoneyDefs,
-		ForageDefs:   result.ForageDefs,
-		MineDefs:     result.MineDefs,
-		StartRoom:    result.StartRoom,
-		BumpRoom:     result.BumpRoom,
+		SeasonalForageDefs:   result.SeasonalForageDefs,
+		CEvents:              result.CEvents,
+		MoneyDefs:            result.MoneyDefs,
+		ForageDefs:           result.ForageDefs,
+		MineDefs:             result.MineDefs,
+		BreakMods:            result.BreakMods,
+		BodyPartDefs:         result.BodyPartDefs,
+		BodyTypeDefs:         result.BodyTypeDefs,
+		StartRoom:            result.StartRoom,
+		BumpRoom:             result.BumpRoom,
 	}
 
 	// Connect to MongoDB (optional — game works without it)
@@ -99,15 +103,19 @@ func main() {
 			return nil, err
 		}
 		return &gameworld.ParsedData{
-			Rooms:       r.Rooms,
-			Items:       r.Items,
-			Monsters:    r.Monsters,
-			Nouns:       r.Nouns,
-			Adjectives:  r.Adjectives,
-			MonsterAdjs: r.MonsterAdjs,
-			Variables:   r.Variables,
-			CEvents:     r.CEvents,
-			ForageDefs:  r.ForageDefs,
+			Rooms:        r.Rooms,
+			Items:        r.Items,
+			Monsters:     r.Monsters,
+			Nouns:        r.Nouns,
+			Adjectives:   r.Adjectives,
+			MonsterAdjs:  r.MonsterAdjs,
+			Variables:    r.Variables,
+			CEvents:      r.CEvents,
+			ForageDefs:   r.ForageDefs,
+			MineDefs:     r.MineDefs,
+			BreakMods:    r.BreakMods,
+			BodyPartDefs: r.BodyPartDefs,
+			BodyTypeDefs: r.BodyTypeDefs,
 		}, nil
 	}
 
@@ -143,14 +151,8 @@ func main() {
 	// Create capture store
 	cs := capture.NewStore(db)
 
-	// Create feedback client (VibeCtl integration)
-	fb := feedback.New(cfg.Feedback.VibectlURL, cfg.Feedback.VibectlAPIKey)
-	if fb.Enabled() {
-		log.Println("Feedback pipeline enabled (VibeCtl)")
-	}
-
 	// Create API server
-	srv := api.NewServer(ge, parsed, authSvc, emailSvc, gl, h, cs, fb, cfg.Server.FrontendURL)
+	srv := api.NewServer(ge, parsed, authSvc, emailSvc, gl, h, cs, cfg.Server.FrontendURL)
 	ge.LoadBanner()
 	ge.LoadGMScripts()
 	h.Start()
@@ -159,6 +161,7 @@ func main() {
 	ge.StartRegenCycle()
 	ge.StartCEventLoop()
 	ge.StartMonsterLoop()
+	ge.StartMonsterSpawnLoop()
 
 	// Start telnet server (for MUD clients)
 	if cfg.Server.TelnetPort > 0 {
