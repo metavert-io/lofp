@@ -1832,7 +1832,7 @@ func (e *GameEngine) castDamageSpell(player *Player, spell *SpellDef, args []str
 		"%s %s to %s. [%d Damage]",
 		damageSeverity(dmg),
 		spellDmgNoun(spell.DmgType),
-		randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs).Name,
+		randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs, 0).Name,
 		dmg,
 	)
 
@@ -1843,7 +1843,7 @@ func (e *GameEngine) castDamageSpell(player *Player, spell *SpellDef, args []str
 		flavorDmg = fmt.Sprintf(
 			"%s slash to %s. [%d Damage]",
 			damageSeverity(dmg),
-			randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs).Name,
+			randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs, 0).Name,
 			dmg,
 		)
 
@@ -1858,7 +1858,7 @@ func (e *GameEngine) castDamageSpell(player *Player, spell *SpellDef, args []str
 		flavorDmg = fmt.Sprintf(
 			"%s burn to %s. [%d Damage]",
 			damageSeverity(dmg),
-			randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs).Name,
+			randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs, 0).Name,
 			dmg,
 		)
 
@@ -1873,7 +1873,7 @@ func (e *GameEngine) castDamageSpell(player *Player, spell *SpellDef, args []str
 		flavorDmg = fmt.Sprintf(
 			"%s blast to %s. [%d Damage]",
 			damageSeverity(dmg),
-			randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs).Name,
+			randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs, 0).Name,
 			dmg,
 		)
 
@@ -1888,7 +1888,7 @@ func (e *GameEngine) castDamageSpell(player *Player, spell *SpellDef, args []str
 		flavorDmg = fmt.Sprintf(
 			"%s shock to %s. [%d Damage]",
 			damageSeverity(dmg),
-			randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs).Name,
+			randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs, 0).Name,
 			dmg,
 		)
 
@@ -1903,7 +1903,7 @@ func (e *GameEngine) castDamageSpell(player *Player, spell *SpellDef, args []str
 		flavorDmg = fmt.Sprintf(
 			"%s strike to %s. [%d Damage]",
 			damageSeverity(dmg),
-			randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs).Name,
+			randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs, 0).Name,
 			dmg,
 		)
 
@@ -1918,7 +1918,7 @@ func (e *GameEngine) castDamageSpell(player *Player, spell *SpellDef, args []str
 		flavorDmg = fmt.Sprintf(
 			"%s blast to %s. [%d Damage]",
 			damageSeverity(dmg),
-			randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs).Name,
+			randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs, 0).Name,
 			dmg,
 		)
 	}

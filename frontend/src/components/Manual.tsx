@@ -1372,7 +1372,7 @@ Obvious exits: north, south, east.
               <CommandEntry cmd="SKIN <corpse>" desc="Eviscerate for specimens. Requires Woodlore or Sagecraft." />
               <CommandEntry cmd="SMELT <ore>" desc="Extract metal from raw ore. Requires Weaponsmith." />
               <CommandEntry cmd="SNEAK <direction>" desc="Move while staying hidden." />
-              <CommandEntry cmd="SPECIALIZE <weapon>" desc="Increase chance to hit vital areas with a specific weapon." />
+              <CommandEntry cmd="SPECIALIZE [wielded weapon] " desc="Increase chance to hit vital areas with a specific weapon.  Wield the weapon first." />
               <CommandEntry cmd="SPELL" desc="View all spells you know." />
               <CommandEntry cmd="SPLIT <amount> <coin type>" desc="Divide coins between party members." />
               <CommandEntry cmd="STALK <target>" desc="Secretly track someone." />

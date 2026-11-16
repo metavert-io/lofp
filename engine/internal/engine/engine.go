@@ -833,30 +833,31 @@ func (e *GameEngine) ProcessCommand(ctx context.Context, player *Player, input s
 		}
 	}
 
-	// Charmed players may only perform peaceful actions.
+	// Charmed players cannot initiate hostile actions.
 	if _, ok := player.HasStatEffect(CharmEffect); ok {
 		verb := strings.ToUpper(strings.Fields(input)[0])
-		switch verb {
-		case "LOOK",
-			"EXAMINE",
-			"INVENTORY",
-			"STATUS",
-			"HELP",
-			"SAY",
-			"WHISPER",
-			"REST",
-			"STAND",
-			"SIT",
-			"STAT",
-			"KNEEL":
-			// Allowed.
 
-		default:
+		switch verb {
+		case "ATTACK", "A",
+			"ADVANCE", "BACKSTAB", "HIDE", "KICK", "KISS", "PUNCH", "SLAP", "STRIKE",
+			"CAST", "C":
+
 			return &CommandResult{
 				Messages: []string{
 					"You feel far too friendly to do that.",
 				},
 			}
+		}
+	}
+
+	// Any command other than SPECIALIZE CONFIRM
+	// cancels a pending weapon specialization.
+	if player.PendingSpecialization != "" {
+		if !strings.EqualFold(
+			strings.Join(strings.Fields(input), " "),
+			"SPECIALIZE CONFIRM",
+		) {
+			player.PendingSpecialization = ""
 		}
 	}
 
@@ -1243,6 +1244,7 @@ func (e *GameEngine) ProcessCommand(ctx context.Context, player *Player, input s
 		var skillMsgs []string
 		skillMsgs = append(skillMsgs, "=== Your Skills ===")
 		hasSkills := false
+
 		for id := 0; id <= 35; id++ {
 			lvl := player.Skills[id]
 			if lvl > 0 {
@@ -1254,10 +1256,41 @@ func (e *GameEngine) ProcessCommand(ctx context.Context, player *Player, input s
 				hasSkills = true
 			}
 		}
+
 		if !hasSkills {
 			skillMsgs = append(skillMsgs, "  You have no trained skills yet.")
 		}
-		skillMsgs = append(skillMsgs, fmt.Sprintf("Build Points: %d", player.BuildPoints))
+
+		// Weapon specializations.
+		if len(player.WeaponMastery) > 0 {
+			skillMsgs = append(skillMsgs, "", "=== Weapon Specializations ===")
+
+			names := make([]string, 0, len(player.WeaponMastery))
+
+			for name, rank := range player.WeaponMastery {
+				if rank > 0 {
+					names = append(names, name)
+				}
+			}
+
+			sort.Strings(names)
+
+			for _, name := range names {
+				rank := player.WeaponMastery[name]
+
+				skillMsgs = append(skillMsgs, fmt.Sprintf(
+					"  %s: rank %d / 5",
+					name,
+					rank,
+				))
+			}
+		}
+
+		skillMsgs = append(skillMsgs, fmt.Sprintf(
+			"Build Points: %d",
+			player.BuildPoints,
+		))
+
 		return &CommandResult{Messages: skillMsgs}
 	case "WEALTH":
 		g := player.Gold
@@ -1960,7 +1993,7 @@ func (e *GameEngine) ProcessCommand(ctx context.Context, player *Player, input s
 	case "NOCK", "LOAD":
 		return e.doLoadWeapon(ctx, player, args)
 	case "SPECIALIZE":
-		return &CommandResult{Messages: []string{"[Weapon specialization coming soon.]"}}
+		return e.doSpecialize(ctx, player, args)
 	// === SKILL-BASED (TODO: implement) ===
 	case "DISARM":
 		return e.doDisarm(ctx, player, args)
@@ -10365,7 +10398,14 @@ func (e *GameEngine) checkTrap(player *Player, ri *gameworld.RoomItem) []string 
 	case trapType == 2: // Gas, minor poison
 		msgs = append(msgs, "A cloud of noxious gas billows out!")
 		player.Poisoned = true
-		player.ApplyStatEffect(trapType, EffectSourcePoison, StatBodyPoint, PoisonNerveGas, time.Duration(PoisonNerveGas)*time.Minute, 0)
+		player.ApplyStatEffect(
+			trapType,
+			EffectSourcePoison,
+			StatBodyPoint,
+			PoisonMinor,
+			time.Duration(PoisonMinor)*time.Minute,
+			0,
+		)
 	case trapType == 3: // Acid
 		dmg := 10 + rand.Intn(15)
 		player.BodyPoints -= dmg
@@ -14525,6 +14565,47 @@ func (e *GameEngine) getAdjName(adjID int) string {
 	return ""
 }
 
+func normalizeWeaponName(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	name = strings.ReplaceAll(name, " ", "")
+	name = strings.ReplaceAll(name, "-", "")
+	return name
+}
+
+func (e *GameEngine) wieldedSpecializationName(player *Player) string {
+	if player.Wielded == nil {
+		return ""
+	}
+
+	def := e.items[player.Wielded.Archetype]
+	if def == nil || !isWeapon(def.Type) {
+		return ""
+	}
+
+	name := e.formatItemNameNoArticle(
+		def,
+		player.Wielded.Adj1,
+		player.Wielded.Adj2,
+		player.Wielded.Adj3,
+	)
+
+	return normalizeWeaponName(name)
+}
+
+func (e *GameEngine) findWeaponByNoun(name string) *gameworld.ItemDef {
+	for _, def := range e.items {
+		if def == nil || !isWeapon(def.Type) {
+			continue
+		}
+
+		if strings.EqualFold(e.getItemNounName(def), name) {
+			return def
+		}
+	}
+
+	return nil
+}
+
 func potionDescription(spellID int) string {
 	for _, recipe := range alchemyRecipes {
 		if recipe.spellID == spellID {
@@ -15328,8 +15409,8 @@ func organizationName(org int) string {
 	return ""
 }
 
-// playerBPSpent calculates total build points spent on skills
-// and spell mastery.
+// playerBPSpent calculates total build points spent on skills,
+// spell mastery, and weapon specialization.
 func playerBPSpent(player *Player) int {
 	total := 0
 
@@ -15351,6 +15432,20 @@ func playerBPSpent(player *Player) int {
 
 		if rank > 1 {
 			total += (rank - 1) * 4
+		}
+	}
+
+	// Weapon specialization.
+	// First rank costs 10 BP; each additional rank costs 5 BP.
+	for _, rank := range player.WeaponMastery {
+		if rank <= 0 {
+			continue
+		}
+
+		total += 10
+
+		if rank > 1 {
+			total += (rank - 1) * 5
 		}
 	}
 
@@ -16002,6 +16097,246 @@ func (e *GameEngine) doTurnPage(ctx context.Context, player *Player, args []stri
 	}
 
 	return nil // fall through to item interaction
+}
+
+func (e *GameEngine) doSpecialize(ctx context.Context, player *Player, args []string) *CommandResult {
+
+	confirm := len(args) == 1 &&
+		strings.EqualFold(args[0], "CONFIRM")
+
+	if len(args) > 0 && !confirm {
+		player.PendingSpecialization = ""
+		return &CommandResult{
+			Messages: []string{
+				"Usage: SPECIALIZE",
+				"       SPECIALIZE CONFIRM",
+			},
+		}
+	}
+
+	// Confirmation must have been requested first.
+	if confirm && player.PendingSpecialization == "" {
+		return &CommandResult{
+			Messages: []string{
+				"You have no pending weapon specialization.",
+			},
+		}
+	}
+
+	// Retrieve the main-hand weapon.
+	if player.Wielded == nil {
+		player.PendingSpecialization = ""
+		return &CommandResult{
+			Messages: []string{
+				"You must be wielding a weapon in your main hand to specialize.",
+			},
+		}
+	}
+
+	weaponDef := e.items[player.Wielded.Archetype]
+
+	if weaponDef == nil || !isWeapon(weaponDef.Type) {
+		player.PendingSpecialization = ""
+		return &CommandResult{
+			Messages: []string{
+				"You must be wielding a weapon in your main hand to specialize.",
+			},
+		}
+	}
+
+	weaponName := e.formatItemNameNoArticle(
+		weaponDef,
+		player.Wielded.Adj1,
+		player.Wielded.Adj2,
+		player.Wielded.Adj3,
+	)
+
+	weaponID := normalizeWeaponName(weaponName)
+
+	// The weapon must still match the pending specialization.
+	if confirm {
+		pending := player.PendingSpecialization
+		player.PendingSpecialization = ""
+
+		if pending != weaponID {
+			return &CommandResult{
+				Messages: []string{
+					"Your wielded weapon has changed. Specialization cancelled.",
+				},
+			}
+		}
+	}
+
+	skillID := weaponSkillForType(weaponDef.Type)
+
+	// Must have at least 10 ranks in the broad weapon skill.
+	if player.Skills[skillID] < 10 {
+		return &CommandResult{
+			Messages: []string{
+				fmt.Sprintf(
+					"You need at least 10 levels in the corresponding weapon skill to specialize in %s.",
+					weaponName,
+				),
+			},
+		}
+	}
+
+	// Must be in a room that teaches the corresponding weapon skill.
+	room := e.rooms[player.RoomNumber]
+	canTrain := false
+
+	if room != nil {
+		for _, training := range room.TrainingSkills {
+			if training.SkillID == skillID {
+				canTrain = true
+				break
+			}
+		}
+	}
+
+	if !canTrain {
+		return &CommandResult{
+			Messages: []string{
+				"You cannot train in weapon specialization here.",
+			},
+		}
+	}
+
+	currentRank := player.WeaponMastery[weaponID]
+
+	if currentRank >= 5 {
+		return &CommandResult{
+			Messages: []string{
+				fmt.Sprintf(
+					"You have already fully specialized in %s.",
+					weaponName,
+				),
+			},
+		}
+	}
+
+	// Maximum of five different weapon specializations.
+	if currentRank == 0 {
+		count := 0
+
+		for _, rank := range player.WeaponMastery {
+			if rank > 0 {
+				count++
+			}
+		}
+
+		if count >= 5 {
+			return &CommandResult{
+				Messages: []string{
+					"You cannot specialize in more than five different weapons.",
+				},
+			}
+		}
+	}
+
+	// First rank costs 10 BP, subsequent ranks cost 5 BP.
+	cost := 10
+	if currentRank > 0 {
+		cost = 5
+	}
+
+	if player.BuildPoints < cost && !player.IsGM {
+		return &CommandResult{
+			Messages: []string{
+				fmt.Sprintf(
+					"You need %d build points to increase your specialization in %s.",
+					cost,
+					weaponName,
+				),
+			},
+		}
+	}
+
+	// ------------------------------------------------------------
+	// STEP 1: REQUEST CONFIRMATION
+	// ------------------------------------------------------------
+
+	if !confirm {
+		player.PendingSpecialization = weaponID
+
+		return &CommandResult{
+			Messages: []string{
+				fmt.Sprintf("You are wielding %s.", weaponName),
+				fmt.Sprintf(
+					"Current specialization rank: %d",
+					currentRank,
+				),
+				fmt.Sprintf(
+					"New specialization rank: %d",
+					currentRank+1,
+				),
+				fmt.Sprintf("Cost: %d build points.", cost),
+				"",
+				"Type SPECIALIZE CONFIRM to proceed.",
+				"Any other command will cancel.",
+			},
+		}
+	}
+
+	// ------------------------------------------------------------
+	// STEP 2: CONFIRMED — APPLY SPECIALIZATION
+	// ------------------------------------------------------------
+
+	if player.WeaponMastery == nil {
+		player.WeaponMastery = make(map[string]int)
+	}
+
+	if !player.IsGM {
+		player.BuildPoints -= cost
+	}
+
+	player.WeaponMastery[weaponID] = currentRank + 1
+
+	e.SavePlayer(ctx, player)
+
+	newRank := player.WeaponMastery[weaponID]
+
+	return &CommandResult{
+		Messages: []string{
+			fmt.Sprintf(
+				"You increase your specialization in %s to rank %d.",
+				weaponName,
+				newRank,
+			),
+			"Your chance of striking a vital location has increased.",
+		},
+	}
+}
+
+func (e *GameEngine) weaponSpecializationID(weaponDef *gameworld.ItemDef, adj1, adj2, adj3 int) int {
+	if weaponDef == nil {
+		return 0
+	}
+
+	nounID := weaponDef.NameID
+	noun := strings.ToLower(e.getItemNounName(weaponDef))
+
+	// Check whether any adjective + noun combination
+	// matches an existing specific weapon noun.
+	for _, adjID := range []int{adj1, adj2, adj3} {
+		if adjID <= 0 {
+			continue
+		}
+
+		adj := strings.ToLower(e.getAdjName(adjID))
+		combined := strings.ReplaceAll(adj+noun, " ", "")
+
+		for id, name := range e.nouns {
+			normalized := strings.ReplaceAll(strings.ToLower(name), " ", "")
+
+			if normalized == combined {
+				return id
+			}
+		}
+	}
+
+	// No composite match: use the original noun.
+	return nounID
 }
 
 func (e *GameEngine) doMasterSpell(ctx context.Context, player *Player, args []string) *CommandResult {

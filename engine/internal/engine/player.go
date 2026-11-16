@@ -187,9 +187,10 @@ type Player struct {
 	BuildPoints  int `bson:"buildPoints,omitempty" json:"buildPoints,omitempty"`
 
 	// Skills
-	Skills       map[int]int  `bson:"skills" json:"skills"`                               // skill# -> level
-	KnownSpells  map[int]bool `bson:"knownSpells,omitempty" json:"knownSpells,omitempty"` // spell# -> known
-	SpellMastery map[int]int  `json:"spellMastery,omitempty"`
+	Skills        map[int]int    `bson:"skills" json:"skills"`                               // skill# -> level
+	KnownSpells   map[int]bool   `bson:"knownSpells,omitempty" json:"knownSpells,omitempty"` // spell# -> known
+	SpellMastery  map[int]int    `json:"spellMastery,omitempty"`
+	WeaponMastery map[string]int `json:"weaponMastery,omitempty"`
 
 	// Internal variables (INTNUM0-99, flags, etc.)
 	IntNums map[int]int `bson:"intNums" json:"intNums"`
@@ -200,7 +201,8 @@ type Player struct {
 	Flag3 int `bson:"-" json:"-"`
 	Flag4 int `bson:"-" json:"-"`
 
-	PendingStatReroll *PendingStats `bson:"-" json:"-"`
+	PendingStatReroll     *PendingStats `bson:"-" json:"-"`
+	PendingSpecialization string        `bson:"-" json:"-"`
 
 	// Appearance / Description
 	DescLine1 string `bson:"descLine1,omitempty" json:"descLine1,omitempty"` // custom description lines (visible on EXAMINE)

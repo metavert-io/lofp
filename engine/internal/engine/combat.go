@@ -466,30 +466,6 @@ func calcToHit(attackRating, defenseRating int) int {
 func playerAttackRating(player *Player, weaponDef *gameworld.ItemDef, offhand bool) int {
 	rating := 50
 	rating += player.Level * 3
-	/*
-		clawGrowth := player.EffectiveStat(ClawGrowth)
-
-		if weaponDef != nil {
-			skillID := weaponSkillForType(weaponDef.Type)
-			weaponSkill := player.Skills[skillID]
-
-			// Secondary weapon skill is limited by Two Weapons skill.
-			if offhand {
-				twoWeaponSkill := player.Skills[1]
-
-				if twoWeaponSkill < weaponSkill {
-					weaponSkill = twoWeaponSkill
-				}
-			}
-
-			rating += weaponSkill * 5
-		} else if player.WolfForm || clawGrowth > 0 {
-			// Wolfling natural weapons
-			rating += player.Skills[4] * 5
-		} else {
-			// Normal unarmed combat
-			rating += player.Skills[24] * 5
-		}  */
 
 	rating += playerAttackSkillLevel(player, weaponDef, offhand) * 5
 
@@ -827,9 +803,13 @@ func randomBodyPart(
 	monsterParts []int,
 	partDefs map[int]*gameworld.BodyPartDef,
 	typeDefs map[string]*gameworld.BodyTypeDef,
+	specRank int,
+
 ) *gameworld.BodyPartDef {
 
 	var ids []int
+
+	debug := true
 
 	// Add standard anatomy for this body type.
 	if def, ok := typeDefs[strings.ToUpper(bodyType)]; ok {
@@ -842,6 +822,7 @@ func randomBodyPart(
 	// Resolve IDs into actual body part definitions.
 	var parts []*gameworld.BodyPartDef
 	totalWeight := 0
+	coreWeight := 0
 
 	for _, id := range ids {
 		if def, ok := partDefs[id]; ok {
@@ -853,6 +834,10 @@ func randomBodyPart(
 			}
 
 			totalWeight += weight
+
+			if strings.EqualFold(def.DamageCategory, "CORE") {
+				coreWeight += weight
+			}
 		}
 	}
 
@@ -870,16 +855,69 @@ func randomBodyPart(
 		}
 	}
 
-	// Select a body part using its relative weight.
-	roll := rand.Intn(totalWeight)
+	// Calculate normal CORE chance.
+	normalCoreChance := float64(coreWeight) / float64(totalWeight)
+	coreChance := normalCoreChance
+
+	// Each specialization rank moves CORE chance toward 75%.
+	// Rank 5 reaches 75%, regardless of the normal CORE chance.
+	if specRank > 0 && coreWeight > 0 && coreWeight < totalWeight {
+		if specRank > 5 {
+			specRank = 5
+		}
+
+		coreChance += (0.75 - coreChance) * float64(specRank) / 5.0
+	}
+
+	// Decide whether this hit targets CORE.
+	wantCore := rand.Float64() < coreChance
+
+	// Determine total weight for the selected category.
+	rollWeight := 0
 
 	for _, part := range parts {
+		isCore := strings.EqualFold(part.DamageCategory, "CORE")
+
+		if isCore != wantCore {
+			continue
+		}
+
+		weight := part.Weight
+		if weight <= 0 {
+			weight = 1
+		}
+
+		rollWeight += weight
+	}
+
+	// Select a body part within that category.
+	roll := rand.Intn(rollWeight)
+
+	for _, part := range parts {
+		isCore := strings.EqualFold(part.DamageCategory, "CORE")
+
+		if isCore != wantCore {
+			continue
+		}
+
 		weight := part.Weight
 		if weight <= 0 {
 			weight = 1
 		}
 
 		if roll < weight {
+
+			if debug {
+				fmt.Printf(
+					"[BODY DEBUG] Spec Rank: %d | Normal CORE: %.1f%% | Adjusted CORE: %.1f%% | Hit: %s (%s)\n",
+					specRank,
+					normalCoreChance*100,
+					coreChance*100,
+					part.Name,
+					part.DamageCategory,
+				)
+			}
+
 			return part
 		}
 
@@ -1041,7 +1079,7 @@ func (e *GameEngine) doAttackMonster(ctx context.Context, player *Player, target
 
 					return &CommandResult{
 						Messages: []string{
-							"Player combat is not allowed here.",
+							"You're not engaged with anything.",
 						},
 					}
 				}
@@ -1729,12 +1767,27 @@ func (e *GameEngine) resolvePlayerWeaponAttack(player *Player, inst *MonsterInst
 			),
 		)
 
+		specRank := 0
+
+		if weapon != nil && weaponDef != nil {
+			weaponName := e.formatItemNameNoArticle(
+				weaponDef,
+				weapon.Adj1,
+				weapon.Adj2,
+				weapon.Adj3,
+			)
+
+			weaponKey := normalizeWeaponName(weaponName)
+			specRank = player.WeaponMastery[weaponKey]
+		}
+
 		// Select hit location once.
 		part := randomBodyPart(
 			def.BodyType,
 			def.BodyParts,
 			e.bodyPartDefs,
 			e.bodyTypeDefs,
+			specRank,
 		)
 
 		// First damage roll.
@@ -1800,14 +1853,7 @@ func (e *GameEngine) resolvePlayerWeaponAttack(player *Player, inst *MonsterInst
 		if dmg <= 0 {
 			dmg = 1
 		}
-		/*
-			msgs = append(msgs, fmt.Sprintf(
-				" [BodyPart: %s | Category: %s | Rolls: %d + %d | Stat: +%d | Skill: %d (+%d) | Final Damage: %d]",
-				part.Name, part.DamageCategory,
-				firstRoll, secondRoll, statBonus,
-				skillLevel, skillBonus, dmg,
-			))
-		*/
+
 		severity := damageSeverity(dmg)
 
 		msgs = append(
@@ -1834,11 +1880,19 @@ func (e *GameEngine) resolvePlayerWeaponAttack(player *Player, inst *MonsterInst
 
 			dmg += critDmg
 
-			critPart := randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs)
-
-			critSeverity := damageSeverity(
-				critDmg,
+			weaponName := e.formatItemNameNoArticle(
+				weaponDef,
+				weapon.Adj1,
+				weapon.Adj2,
+				weapon.Adj3,
 			)
+
+			weaponKey := normalizeWeaponName(weaponName)
+			specRank := player.WeaponMastery[weaponKey]
+
+			critPart := randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs, specRank)
+
+			critSeverity := damageSeverity(critDmg)
 
 			weaponNoun :=
 				strings.ToLower(
@@ -2416,7 +2470,7 @@ func (e *GameEngine) monsterAttackPlayer(inst *MonsterInstance, def *gameworld.M
 				bodytype = "ANIMAL"
 			}
 
-			part := randomBodyPart(bodytype, nil, e.bodyPartDefs, e.bodyTypeDefs)
+			part := randomBodyPart(bodytype, nil, e.bodyPartDefs, e.bodyTypeDefs, 0)
 			severity := damageSeverity(specDmg)
 
 			// ----------------------------------------------------
@@ -2656,7 +2710,7 @@ func (e *GameEngine) monsterAttackPlayer(inst *MonsterInstance, def *gameworld.M
 			bodytype = "ANIMAL"
 		}
 
-		part := randomBodyPart(bodytype, nil, e.bodyPartDefs, e.bodyTypeDefs)
+		part := randomBodyPart(bodytype, nil, e.bodyPartDefs, e.bodyTypeDefs, 0)
 
 		severity := damageSeverity(dmg)
 

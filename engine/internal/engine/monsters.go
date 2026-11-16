@@ -1692,7 +1692,7 @@ func (e *GameEngine) releaseMonsterSpell(inst *MonsterInstance, def *gameworld.M
 		bodytype = "ANIMAL"
 	}
 
-	part := randomBodyPart(bodytype, nil, e.bodyPartDefs, e.bodyTypeDefs)
+	part := randomBodyPart(bodytype, nil, e.bodyPartDefs, e.bodyTypeDefs, 0)
 
 	severity := damageSeverity(dmg)
 
