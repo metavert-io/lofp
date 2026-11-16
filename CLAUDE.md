@@ -142,7 +142,6 @@ The game world is defined in a custom scripting language (documented in `origina
 - Security: rate limiting, connection caps, chat flood protection, HTML sanitization
 - WebSocket-based real-time multiplayer
 - Admin panel for rooms/items/monsters/players/logs
-- Feedback pipeline: REPORT command forwards to VibeCtl for triage and issue tracking
 - Production: Fly.io (1 machine, ord region) at lofp.metavert.io
   - Single machine to avoid multi-machine state desync (monsters, combat, player visibility)
   - Scale to 2+ machines only after implementing full hub-based monster/combat coordination

@@ -19,7 +19,6 @@ import (
 	"github.com/metavert-io/lofp/internal/capture"
 	"github.com/metavert-io/lofp/internal/email"
 	"github.com/metavert-io/lofp/internal/engine"
-	"github.com/metavert-io/lofp/internal/feedback"
 	"github.com/metavert-io/lofp/internal/gamelog"
 	"github.com/metavert-io/lofp/internal/gameworld"
 	"github.com/metavert-io/lofp/internal/hub"
@@ -34,7 +33,6 @@ type Server struct {
 	gamelog     *gamelog.Logger
 	hub         *hub.Hub
 	captures    *capture.Store
-	feedback    *feedback.Client
 	router      *mux.Router
 	upgrader    websocket.Upgrader
 	sessions    map[string]*Session
@@ -146,7 +144,7 @@ func (s *Server) checkRateLimit(ip, endpoint string, maxAttempts int, window tim
 	return true
 }
 
-func NewServer(ge *engine.GameEngine, parsed *gameworld.ParsedData, authSvc *auth.Service, emailSvc *email.Service, gl *gamelog.Logger, h *hub.Hub, cs *capture.Store, fb *feedback.Client, frontendURL string) *Server {
+func NewServer(ge *engine.GameEngine, parsed *gameworld.ParsedData, authSvc *auth.Service, emailSvc *email.Service, gl *gamelog.Logger, h *hub.Hub, cs *capture.Store, frontendURL string) *Server {
 	s := &Server{
 		engine:      ge,
 		parsed:      parsed,
@@ -155,7 +153,6 @@ func NewServer(ge *engine.GameEngine, parsed *gameworld.ParsedData, authSvc *aut
 		gamelog:     gl,
 		hub:         h,
 		captures:    cs,
-		feedback:    fb,
 		sessions:    make(map[string]*Session),
 		frontendURL: frontendURL,
 		connsByIP:   make(map[string]int),
@@ -276,7 +273,7 @@ func (s *Server) Router() *mux.Router {
 func (s *Server) setupRoutes() {
 	s.router.Use(s.corsMiddleware)
 
-	// Health check (vibectl compatible)
+	// Health check (used by Fly)
 	s.router.HandleFunc("/healthz", s.handleHealthz).Methods("GET", "HEAD")
 
 	// Game WebSocket
@@ -944,15 +941,6 @@ func (s *Server) dispatchCommandResult(session *Session, result *engine.CommandR
 	if result.LogEventType != "" {
 		s.gamelog.Log(gamelog.EventType(result.LogEventType), session.Player.FullName(), "",
 			result.LogEventDetail, session.Player.RoomNumber, "")
-		// Forward REPORT to VibeCtl feedback pipeline
-		if result.LogEventType == "report" && s.feedback != nil {
-			room := s.engine.GetRoom(session.Player.RoomNumber)
-			roomName := ""
-			if room != nil {
-				roomName = room.Name
-			}
-			s.feedback.Submit(session.Player.FullName(), session.Player.RoomNumber, roomName, result.LogEventDetail)
-		}
 	}
 	// Telepathy broadcast
 	if result.TelepathyMsg != "" {
