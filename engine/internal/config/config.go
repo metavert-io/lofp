@@ -9,17 +9,11 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	MongoDB  MongoDBConfig  `yaml:"mongodb"`
-	Game     GameConfig     `yaml:"game"`
-	Auth     AuthConfig     `yaml:"auth"`
-	Email    EmailConfig    `yaml:"email"`
-	Feedback FeedbackConfig `yaml:"feedback"`
-}
-
-type FeedbackConfig struct {
-	VibectlURL    string `yaml:"vibectl_url"`
-	VibectlAPIKey string `yaml:"vibectl_api_key"`
+	Server  ServerConfig  `yaml:"server"`
+	MongoDB MongoDBConfig `yaml:"mongodb"`
+	Game    GameConfig    `yaml:"game"`
+	Auth    AuthConfig    `yaml:"auth"`
+	Email   EmailConfig   `yaml:"email"`
 }
 
 type AuthConfig struct {
