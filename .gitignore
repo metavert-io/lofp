@@ -10,4 +10,5 @@ engine/lofp
 VIBECTL.md
 .vscode/
 __debug_bin*
-start.batstart.bat
+start.bat
+engine/lofp
