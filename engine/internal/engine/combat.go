@@ -1770,15 +1770,21 @@ func (e *GameEngine) resolvePlayerWeaponAttack(player *Player, inst *MonsterInst
 		specRank := 0
 
 		if weapon != nil && weaponDef != nil {
-			weaponName := e.formatItemNameNoArticle(
-				weaponDef,
-				weapon.Adj1,
-				weapon.Adj2,
-				weapon.Adj3,
+			// Normal equipped weapons.
+			weaponKey := normalizeWeaponName(
+				e.formatItemNameNoArticle(
+					weaponDef,
+					0,
+					0,
+					weapon.Adj3,
+				),
 			)
-
-			weaponKey := normalizeWeaponName(weaponName)
 			specRank = player.WeaponMastery[weaponKey]
+
+		} else if weaponDef == nil &&
+			(player.WolfForm || clawGrowth > 0) {
+			// Natural claws from Clawgrowth or wolf form.
+			specRank = player.WeaponMastery["claws"]
 		}
 
 		// Select hit location once.
@@ -1880,15 +1886,17 @@ func (e *GameEngine) resolvePlayerWeaponAttack(player *Player, inst *MonsterInst
 
 			dmg += critDmg
 
-			weaponName := e.formatItemNameNoArticle(
-				weaponDef,
-				weapon.Adj1,
-				weapon.Adj2,
-				weapon.Adj3,
-			)
-
-			weaponKey := normalizeWeaponName(weaponName)
-			specRank := player.WeaponMastery[weaponKey]
+			if weapon != nil && weaponDef != nil {
+				weaponKey := normalizeWeaponName(
+					e.formatItemNameNoArticle(
+						weaponDef,
+						0,
+						0,
+						weapon.Adj3,
+					),
+				)
+				specRank = player.WeaponMastery[weaponKey]
+			}
 
 			critPart := randomBodyPart(def.BodyType, def.BodyParts, e.bodyPartDefs, e.bodyTypeDefs, specRank)
 
@@ -3481,9 +3489,11 @@ func (e *GameEngine) handleMonsterDeath(killer *Player, inst *MonsterInstance, d
 				ri := gameworld.RoomItem{
 					Ref:       ref,
 					Archetype: wep.Archetype,
-					Adj1:      wep.Adj,
 				}
 
+				if wep.Adj > 0 {
+					ri.Adj3 = wep.Adj
+				}
 				if def.WeaponPlus > 0 {
 					ri.Val2 = def.WeaponPlus
 				}
@@ -3495,9 +3505,9 @@ func (e *GameEngine) handleMonsterDeath(killer *Player, inst *MonsterInstance, d
 
 				wepName := e.formatItemName(
 					wepDef,
-					wep.Adj,
-					0,
-					0,
+					ri.Adj1,
+					ri.Adj2,
+					ri.Adj3,
 				)
 
 				if e.localRoomBroadcast != nil {

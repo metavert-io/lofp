@@ -2248,6 +2248,21 @@ func (sc *ScriptContext) setVar(name string, val int) {
 		sc.Player.IntNums[idx] = val
 		return
 	}
+
+	if strings.HasPrefix(name, "SKILL") {
+		idx, err := strconv.Atoi(name[5:])
+		if err != nil || idx < 0 || idx > 35 {
+			return
+		}
+
+		if sc.Player.Skills == nil {
+			sc.Player.Skills = make(map[int]int)
+		}
+
+		sc.Player.Skills[idx] = val
+		return
+	}
+
 	if strings.HasPrefix(name, "ITEMVAL") {
 		idx, err := strconv.Atoi(name[7:])
 		if err != nil || sc.ItemRef == nil {

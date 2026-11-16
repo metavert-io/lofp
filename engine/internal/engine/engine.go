@@ -16151,7 +16151,14 @@ func (e *GameEngine) doSpecialize(ctx context.Context, player *Player, args []st
 		player.Wielded.Adj3,
 	)
 
-	weaponID := normalizeWeaponName(weaponName)
+	weaponID := normalizeWeaponName(
+		e.formatItemNameNoArticle(
+			weaponDef,
+			0,
+			0,
+			player.Wielded.Adj3,
+		),
+	)
 
 	// The weapon must still match the pending specialization.
 	if confirm {
@@ -16182,26 +16189,27 @@ func (e *GameEngine) doSpecialize(ctx context.Context, player *Player, args []st
 	}
 
 	// Must be in a room that teaches the corresponding weapon skill.
-	room := e.rooms[player.RoomNumber]
-	canTrain := false
+	/*
+		room := e.rooms[player.RoomNumber]
+		canTrain := false
 
-	if room != nil {
-		for _, training := range room.TrainingSkills {
-			if training.SkillID == skillID {
-				canTrain = true
-				break
+		if room != nil {
+			for _, training := range room.TrainingSkills {
+				if training.SkillID == skillID {
+					canTrain = true
+					break
+				}
 			}
 		}
-	}
 
-	if !canTrain {
-		return &CommandResult{
-			Messages: []string{
-				"You cannot train in weapon specialization here.",
-			},
+		if !canTrain {
+			return &CommandResult{
+				Messages: []string{
+					"You cannot train in weapon specialization here.",
+				},
+			}
 		}
-	}
-
+	*/
 	currentRank := player.WeaponMastery[weaponID]
 
 	if currentRank >= 5 {

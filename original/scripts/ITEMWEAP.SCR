@@ -2835,7 +2835,7 @@ IFPREVERB GET -1
     ECHO PLAYER You already have the claws.
   ELSE
     IFVAR SKILL4 > 9
-      ECHO PLAYER [You may now specialize in your natural claws by typing 'SPEC CLAWS']
+      ECHO PLAYER [Wield claws and then you may now specialize in your natural claws by typing 'SPECIALIZE']
       IFVAR SKILL13 < 10
         IFVAR SKILL13 = 0
           EQUAL INTNUM96 999
@@ -2856,7 +2856,7 @@ IFPREVERB WIELD -1
     ECHO PLAYER You are not skilled enough in the way of the claw to wield these.
   ENDIF
   IFVAR SKILL4 > 9
-    ECHO PLAYER [You may now specialize in your natural claws by typing 'SPEC CLAWS'!]
+   ECHO PLAYER [Wield claws and then you may now specialize in your natural claws by typing 'SPECIALIZE']
     IFVAR SKILL13 < 10
       IFVAR SKILL13 = 0
         EQUAL INTNUM96 999
