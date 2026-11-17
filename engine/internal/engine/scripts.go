@@ -893,6 +893,8 @@ func (sc *ScriptContext) execAction(action gameworld.ScriptAction) {
 		sc.doAffect(action.Args)
 	case "RANDOM":
 		sc.doRandom(action.Args)
+	case "SKILLCHECK":
+		sc.doSkillCheck(action.Args)
 	case "DAMAGEPLR":
 		sc.doDamagePlr(action.Args)
 	case "DAMAGEALL":
@@ -2438,6 +2440,38 @@ func (sc *ScriptContext) doRandom(args []string) {
 		sc.Messages = append(
 			sc.Messages,
 			fmt.Sprintf("[TRACE]   %s = %d", varName, value),
+		)
+	}
+}
+
+func (sc *ScriptContext) doSkillCheck(args []string) {
+	if len(args) < 3 || sc.Player == nil {
+		return
+	}
+
+	skillID := sc.resolveNumericArg(args[0])
+	bonus := sc.resolveNumericArg(args[1])
+	varName := strings.ToUpper(args[2])
+
+	skillLevel := sc.Player.Skills[skillID]
+
+	roll := rand.Intn(100) + 1
+
+	result := roll - 50 + skillLevel*5 + bonus
+
+	sc.setVar(varName, result)
+
+	if sc.Player.GMTrace {
+		sc.Messages = append(sc.Messages,
+			fmt.Sprintf(
+				"[TRACE] SKILLCHECK skill=%d level=%d roll=%d bonus=%d result=%d → %s",
+				skillID,
+				skillLevel,
+				roll,
+				bonus,
+				result,
+				varName,
+			),
 		)
 	}
 }

@@ -3229,8 +3229,6 @@ func (e *GameEngine) applyEntryScripts(ctx context.Context, player *Player, room
 //     to have already been present when the player entered
 func (e *GameEngine) spawnForRoomOnEntry(roomNum int) {
 
-	//log.Printf("[SPAWN] room-entry CHECK: room=%d", roomNum)
-
 	if e.monsterMgr == nil {
 		return
 	}
@@ -3247,13 +3245,6 @@ func (e *GameEngine) spawnForRoomOnEntry(roomNum int) {
 	}
 
 	entryRoll := rand.Intn(100)
-
-	log.Printf(
-		"[SPAWN] room-entry roll: room=%d group=%d roll=%d chance=25%%",
-		roomNum,
-		room.MonsterGroup,
-		entryRoll,
-	)
 
 	if entryRoll >= 25 {
 		return
@@ -3372,13 +3363,6 @@ func (e *GameEngine) spawnForRoomOnEntry(roomNum int) {
 
 	mm.mu.Unlock()
 
-	log.Printf(
-		"[SPAWN] room-entry spawn: room=%d group=%d monster=%d (%s)",
-		roomNum,
-		groupID,
-		chosenID,
-		FormatMonsterName(def, e.monAdjs),
-	)
 }
 
 // doLookFull always shows the full room description (explicit LOOK command).

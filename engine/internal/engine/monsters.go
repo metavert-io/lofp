@@ -203,29 +203,8 @@ func (e *GameEngine) spawnForRoom(roomNum int) {
 }
 
 func (e *GameEngine) generateMonsterForRoom(roomNum int) {
-	log.Printf("[SPAWN] generateMonsterForRoom called for room %d", roomNum)
-
-	if e.monsterMgr == nil {
-		log.Printf("[SPAWN] room %d: no monster manager", roomNum)
-		return
-	}
 
 	room := e.rooms[roomNum]
-	if room == nil {
-		log.Printf("[SPAWN] room %d: room not found", roomNum)
-		return
-	}
-
-	if room.MonsterGroup == 0 {
-		log.Printf("[SPAWN] room %d: no monster group", roomNum)
-		return
-	}
-
-	if room.Terrain == "ABOVE" || room.Terrain == "SKY" {
-		log.Printf("[SPAWN] room %d: terrain %s does not allow spawning", roomNum, room.Terrain)
-		return
-	}
-
 	groupID := room.MonsterGroup
 	mm := e.monsterMgr
 
@@ -250,14 +229,6 @@ func (e *GameEngine) generateMonsterForRoom(roomNum int) {
 	ticks := mm.roomSpawnTicks[roomNum]
 	chance := monsterSpawnChance(ticks)
 
-	log.Printf(
-		"[SPAWN] room %d group %d: cycle tick=%d chance=%d%%",
-		roomNum,
-		groupID,
-		ticks,
-		chance,
-	)
-
 	// Tick 1 deliberately cannot generate anything.
 	if chance <= 0 {
 		// Defensive reset in case the counter somehow gets outside
@@ -273,35 +244,10 @@ func (e *GameEngine) generateMonsterForRoom(roomNum int) {
 	chanceRoll := rand.Intn(100)
 
 	if chanceRoll >= chance {
-		log.Printf(
-			"[SPAWN] room %d: generation roll %d failed against %d%%",
-			roomNum,
-			chanceRoll,
-			chance,
-		)
-
-		// Tick 4 is the final attempt in this cycle.
-		// Failure here means this cycle produces no monster.
-		if ticks >= 4 {
-			log.Printf(
-				"[SPAWN] room %d group %d: generation cycle ended with no monster",
-				roomNum,
-				groupID,
-			)
-
-			mm.roomSpawnTicks[roomNum] = 0
-		}
 
 		mm.mu.Unlock()
 		return
 	}
-
-	log.Printf(
-		"[SPAWN] room %d: generation roll %d PASSED against %d%%",
-		roomNum,
-		chanceRoll,
-		chance,
-	)
 
 	// ------------------------------------------------------------
 	// BUILD ELIGIBLE MLIST CANDIDATES
@@ -326,11 +272,6 @@ func (e *GameEngine) generateMonsterForRoom(roomNum int) {
 
 		def := e.monsters[ml.MonsterID]
 		if def == nil {
-			log.Printf(
-				"[SPAWN] room %d: MLIST monster %d has no definition",
-				roomNum,
-				ml.MonsterID,
-			)
 			continue
 		}
 
@@ -347,15 +288,6 @@ func (e *GameEngine) generateMonsterForRoom(roomNum int) {
 				existingCount++
 			}
 		}
-
-		log.Printf(
-			"[SPAWN] room %d: monster=%d weight=%d cap=%d alive=%d",
-			roomNum,
-			ml.MonsterID,
-			ml.Probability,
-			ml.MaxCount,
-			existingCount,
-		)
 
 		if existingCount >= ml.MaxCount {
 			continue
@@ -379,11 +311,6 @@ func (e *GameEngine) generateMonsterForRoom(roomNum int) {
 	// The generation roll succeeded, but there is nothing eligible
 	// to generate because everything is capped or invalid.
 	if len(candidates) == 0 || totalWeight <= 0 {
-		log.Printf(
-			"[SPAWN] room %d group %d: no eligible MLIST candidates",
-			roomNum,
-			groupID,
-		)
 
 		mm.roomSpawnTicks[roomNum] = 0
 		mm.mu.Unlock()
@@ -395,7 +322,6 @@ func (e *GameEngine) generateMonsterForRoom(roomNum int) {
 	// ------------------------------------------------------------
 
 	weightRoll := rand.Intn(totalWeight)
-	originalWeightRoll := weightRoll
 
 	chosenID := 0
 
@@ -409,10 +335,6 @@ func (e *GameEngine) generateMonsterForRoom(roomNum int) {
 	}
 
 	if chosenID == 0 {
-		log.Printf(
-			"[SPAWN] room %d: weighted selection failed unexpectedly",
-			roomNum,
-		)
 
 		mm.roomSpawnTicks[roomNum] = 0
 		mm.mu.Unlock()
@@ -421,25 +343,11 @@ func (e *GameEngine) generateMonsterForRoom(roomNum int) {
 
 	def := e.monsters[chosenID]
 	if def == nil {
-		log.Printf(
-			"[SPAWN] room %d: selected monster %d has no definition",
-			roomNum,
-			chosenID,
-		)
 
 		mm.roomSpawnTicks[roomNum] = 0
 		mm.mu.Unlock()
 		return
 	}
-
-	log.Printf(
-		"[SPAWN] room %d: weight roll %d/%d selected monster %d (%s)",
-		roomNum,
-		originalWeightRoll,
-		totalWeight,
-		chosenID,
-		FormatMonsterName(def, e.monAdjs),
-	)
 
 	// ------------------------------------------------------------
 	// CREATE ONE MONSTER
@@ -474,14 +382,6 @@ func (e *GameEngine) generateMonsterForRoom(roomNum int) {
 
 	// Successful generation ends the cycle.
 	mm.roomSpawnTicks[roomNum] = 0
-
-	log.Printf(
-		"[SPAWN] room %d: SPAWNED monster %d (%s), hp=%d",
-		roomNum,
-		chosenID,
-		FormatMonsterName(def, e.monAdjs),
-		hp,
-	)
 
 	// Don't hold the manager mutex while broadcasting.
 	mm.mu.Unlock()
@@ -520,14 +420,13 @@ func (e *GameEngine) generateMonsterForRoom(roomNum int) {
 }
 
 func (e *GameEngine) StartMonsterSpawnLoop() {
-	log.Printf("[SPAWN] monster spawn loop STARTED")
 
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 
 		for range ticker.C {
-			log.Printf("[SPAWN] spawn loop tick")
+
 			e.monsterSpawnTick()
 		}
 	}()
