@@ -27,7 +27,8 @@ func loadTestParsed(t *testing.T) *gameworld.ParsedData {
 		Rooms: result.Rooms, Items: result.Items, Monsters: result.Monsters,
 		Nouns: result.Nouns, Adjectives: result.Adjectives, MonsterAdjs: result.MonsterAdjs,
 		Variables: result.Variables, Regions: result.Regions, MonsterLists: result.MonsterLists,
-		CEvents: result.CEvents, MoneyDefs: result.MoneyDefs, ForageDefs: result.ForageDefs,
+		BodyPartDefs: result.BodyPartDefs,
+		CEvents:      result.CEvents, MoneyDefs: result.MoneyDefs, ForageDefs: result.ForageDefs,
 		MineDefs: result.MineDefs, StartRoom: result.StartRoom, BumpRoom: result.BumpRoom,
 	}
 }
@@ -162,7 +163,9 @@ func TestRoom225Stairway(t *testing.T) {
 	// Check if "stair" matches item 81
 	for _, ri := range room.Items {
 		def := ge.items[ri.Archetype]
-		if def == nil { continue }
+		if def == nil {
+			continue
+		}
 		noun := ge.nouns[def.NameID]
 		if matchesTarget(noun, "stair", "") {
 			t.Logf("  MATCH: 'stair' matches noun=%q arch=%d type=%q val2=%d", noun, ri.Archetype, def.Type, ri.Val2)
@@ -187,7 +190,7 @@ func TestRoom225Stairway(t *testing.T) {
 
 func TestRoom592Exists(t *testing.T) {
 	parsed := loadTestParsed(t)
-	
+
 	// Check if room 592 is in parsed results
 	found := false
 	for _, r := range parsed.Rooms {
@@ -204,7 +207,7 @@ func TestRoom592Exists(t *testing.T) {
 	}
 	if !found {
 		t.Error("Room 592 NOT FOUND in parsed data!")
-		
+
 		// Check which rooms ARE parsed from AMILOR.SCR
 		for _, r := range parsed.Rooms {
 			if r.SourceFile == "AMILOR.SCR" {
@@ -212,7 +215,7 @@ func TestRoom592Exists(t *testing.T) {
 			}
 		}
 	}
-	
+
 	// Also check total room count and if 591 exists
 	t.Logf("Total rooms: %d", len(parsed.Rooms))
 	for _, r := range parsed.Rooms {

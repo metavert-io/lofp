@@ -19,7 +19,6 @@ import (
 	"github.com/metavert-io/lofp/internal/capture"
 	"github.com/metavert-io/lofp/internal/email"
 	"github.com/metavert-io/lofp/internal/engine"
-	"github.com/metavert-io/lofp/internal/feedback"
 	"github.com/metavert-io/lofp/internal/gamelog"
 	"github.com/metavert-io/lofp/internal/gameworld"
 	"github.com/metavert-io/lofp/internal/hub"
@@ -34,7 +33,6 @@ type Server struct {
 	gamelog     *gamelog.Logger
 	hub         *hub.Hub
 	captures    *capture.Store
-	feedback    *feedback.Client
 	router      *mux.Router
 	upgrader    websocket.Upgrader
 	sessions    map[string]*Session
@@ -58,14 +56,14 @@ type ClientConn interface {
 type Session struct {
 	Player       *engine.Player
 	Conn         ClientConn
-	CaptureID    string    // active capture session ID, empty if not recording
-	lastCmdTime  time.Time // rate limiting: last command timestamp
-	cmdCount     int       // rate limiting: commands in current window
+	CaptureID    string      // active capture session ID, empty if not recording
+	lastCmdTime  time.Time   // rate limiting: last command timestamp
+	cmdCount     int         // rate limiting: commands in current window
 	chatTimes    []time.Time // chat flood: timestamps of recent broadcasts
 	cmdTimes     []time.Time // command rate: sliding window for 10/10s limit
-	authFailures int        // auth attempt failures (disconnect after 3)
-	lastActivity time.Time  // idle timeout tracking
-	quitSent     bool       // QUIT already broadcast departure
+	authFailures int         // auth attempt failures (disconnect after 3)
+	lastActivity time.Time   // idle timeout tracking
+	quitSent     bool        // QUIT already broadcast departure
 }
 
 // wsConn wraps a gorilla WebSocket connection to implement ClientConn.
@@ -102,7 +100,6 @@ func (w *wsConn) Close() error {
 func (w *wsConn) RemoteAddr() string {
 	return w.conn.RemoteAddr().String()
 }
-
 
 // getClientIP extracts the real client IP from the request, preferring
 // Fly-Client-IP (set by Fly.io proxy), then X-Forwarded-For, then RemoteAddr.
@@ -147,7 +144,7 @@ func (s *Server) checkRateLimit(ip, endpoint string, maxAttempts int, window tim
 	return true
 }
 
-func NewServer(ge *engine.GameEngine, parsed *gameworld.ParsedData, authSvc *auth.Service, emailSvc *email.Service, gl *gamelog.Logger, h *hub.Hub, cs *capture.Store, fb *feedback.Client, frontendURL string) *Server {
+func NewServer(ge *engine.GameEngine, parsed *gameworld.ParsedData, authSvc *auth.Service, emailSvc *email.Service, gl *gamelog.Logger, h *hub.Hub, cs *capture.Store, frontendURL string) *Server {
 	s := &Server{
 		engine:      ge,
 		parsed:      parsed,
@@ -156,7 +153,6 @@ func NewServer(ge *engine.GameEngine, parsed *gameworld.ParsedData, authSvc *aut
 		gamelog:     gl,
 		hub:         h,
 		captures:    cs,
-		feedback:    fb,
 		sessions:    make(map[string]*Session),
 		frontendURL: frontendURL,
 		connsByIP:   make(map[string]int),
@@ -201,8 +197,8 @@ func NewServer(ge *engine.GameEngine, parsed *gameworld.ParsedData, authSvc *aut
 	})
 
 	// Set up room broadcast for background tasks (monsters, CEVENTs)
-	ge.SetRoomBroadcast(func(roomNumber int, messages []string) {
-		s.broadcastToRoom(roomNumber, "", messages)
+	ge.SetRoomBroadcast(func(roomNumber int, excludeName string, messages []string) {
+		s.broadcastToRoom(roomNumber, excludeName, messages)
 	})
 
 	// Local-only broadcast for monster activity (no hub, this machine only)
@@ -277,7 +273,7 @@ func (s *Server) Router() *mux.Router {
 func (s *Server) setupRoutes() {
 	s.router.Use(s.corsMiddleware)
 
-	// Health check (vibectl compatible)
+	// Health check (used by Fly)
 	s.router.HandleFunc("/healthz", s.handleHealthz).Methods("GET", "HEAD")
 
 	// Game WebSocket
@@ -348,6 +344,18 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/admin/characters/deleted", s.handleAdminListDeletedCharacters).Methods("GET")
 	api.HandleFunc("/admin/characters/{firstName}/recover", s.handleAdminRecoverCharacter).Methods("PUT")
 
+	gmPagesDir := "/app/gm-pages"
+
+	if info, err := os.Stat(gmPagesDir); err == nil && info.IsDir() {
+		s.router.PathPrefix("/gm-pages/").Handler(
+			http.StripPrefix(
+				"/gm-pages/",
+				http.FileServer(http.Dir(gmPagesDir)),
+			),
+		)
+
+		log.Printf("Serving GM pages from %s", gmPagesDir)
+	}
 	// Serve static frontend files in production (if /app/static exists)
 	staticDir := os.Getenv("LOFP_STATIC_DIR")
 	if staticDir == "" {
@@ -490,7 +498,9 @@ func (s *Server) handleGameWS(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		s.connMu.Lock()
 		s.connsByIP[ip]--
-		if s.connsByIP[ip] <= 0 { delete(s.connsByIP, ip) }
+		if s.connsByIP[ip] <= 0 {
+			delete(s.connsByIP, ip)
+		}
 		s.connMu.Unlock()
 	}()
 
@@ -763,30 +773,48 @@ func (s *Server) handleGameWS(w http.ResponseWriter, r *http.Request) {
 				session.lastCmdTime = now
 			}
 			session.cmdCount++
-			if session.cmdCount > 4 {
+			if session.cmdCount > 10 {
 				s.sendResult(session, &engine.CommandResult{
 					Messages: []string{"[Slow down! Too many commands.]"},
 				})
 				continue
 			}
-			// Rate limit 2: max 10 commands per 10 seconds (sustained)
+
+			// Rate limit 2: max 30 commands per 10 seconds (sustained)
 			cutoff := now.Add(-10 * time.Second)
+
 			var recentCmds []time.Time
 			for _, t := range session.cmdTimes {
-				if t.After(cutoff) { recentCmds = append(recentCmds, t) }
+				if t.After(cutoff) {
+					recentCmds = append(recentCmds, t)
+				}
 			}
+
 			session.cmdTimes = append(recentCmds, now)
-			if len(session.cmdTimes) > 10 {
+
+			if len(session.cmdTimes) > 30 {
 				s.sendResult(session, &engine.CommandResult{
-					Messages: []string{"[Slow down! Too many commands.]"},
+					Messages: []string{
+						"[Slow down! Too many commands. Please wait a few seconds.]",
+					},
 				})
 				continue
 			}
+
+			if len(session.cmdTimes) == 25 {
+				s.sendResult(session, &engine.CommandResult{
+					Messages: []string{
+						"[You're sending commands very quickly. Slow down or you'll be temporarily throttled.]",
+					},
+				})
+			}
+
 			var cmd CommandMsg
 			json.Unmarshal(msg.Data, &cmd)
 			ctx := context.Background()
 			playerRoom := session.Player.RoomNumber
 			result := s.engine.ProcessCommand(ctx, session.Player, cmd.Input)
+
 			result.PlayerState = session.Player
 			result.PromptIndicators = session.Player.PromptIndicators()
 			s.sendResult(session, result)
@@ -812,10 +840,12 @@ func (s *Server) handleGameWS(w http.ResponseWriter, r *http.Request) {
 				cutoff := now.Add(-10 * time.Second)
 				var recent []time.Time
 				for _, t := range session.chatTimes {
-					if t.After(cutoff) { recent = append(recent, t) }
+					if t.After(cutoff) {
+						recent = append(recent, t)
+					}
 				}
 				session.chatTimes = recent
-				if len(session.chatTimes) >= 5 {
+				if len(session.chatTimes) >= 10 {
 					s.sendResult(session, &engine.CommandResult{
 						Messages: []string{"[You are sending messages too quickly. Please wait.]"},
 					})
@@ -911,15 +941,6 @@ func (s *Server) dispatchCommandResult(session *Session, result *engine.CommandR
 	if result.LogEventType != "" {
 		s.gamelog.Log(gamelog.EventType(result.LogEventType), session.Player.FullName(), "",
 			result.LogEventDetail, session.Player.RoomNumber, "")
-		// Forward REPORT to VibeCtl feedback pipeline
-		if result.LogEventType == "report" && s.feedback != nil {
-			room := s.engine.GetRoom(session.Player.RoomNumber)
-			roomName := ""
-			if room != nil {
-				roomName = room.Name
-			}
-			s.feedback.Submit(session.Player.FullName(), session.Player.RoomNumber, roomName, result.LogEventDetail)
-		}
 	}
 	// Telepathy broadcast
 	if result.TelepathyMsg != "" {
@@ -932,7 +953,7 @@ func (s *Server) dispatchCommandResult(session *Session, result *engine.CommandR
 			if sess.Player == nil || sess.Player.FirstName == result.TelepathySender {
 				continue
 			}
-			if sess.Player.TelepathyActive {
+			if sess.Player.HasTelepathy() {
 				s.sendBroadcast(sess, telepathyLines)
 			}
 		}
