@@ -35,6 +35,7 @@ type ParseResult struct {
 	BreakMods            []gameworld.BreakModDef
 	StartRoom            int
 	BumpRoom             int
+	Macros               []gameworld.ScriptMacro
 }
 
 // ParseConfig reads LEGENDS.CFG and loads all referenced script files.
@@ -133,6 +134,22 @@ func ParseConfig(configPath string) (*ParseResult, error) {
 	result.Items = deduplicateItems(result.Items)
 	result.Monsters = deduplicateMonsters(result.Monsters)
 	result.Rooms = deduplicateRooms(result.Rooms)
+
+	// Deduplicate macros by number.
+	// Later definitions override earlier ones.
+	seen := make(map[int]int)
+	unique := make([]gameworld.ScriptMacro, 0, len(result.Macros))
+
+	for _, macro := range result.Macros {
+		if index, exists := seen[macro.Number]; exists {
+			unique[index] = macro
+		} else {
+			seen[macro.Number] = len(unique)
+			unique = append(unique, macro)
+		}
+	}
+
+	result.Macros = unique
 
 	return result, scanner.Err()
 }
@@ -268,6 +285,8 @@ func (p *fileParser) parse() {
 			p.parseMonster(fields)
 		case "TRAITDEF":
 			p.parseTrait(fields)
+		case "MACRO":
+			p.parseMacro(fields)
 		case "NOUNDEF":
 			if len(fields) >= 3 {
 				id, _ := strconv.Atoi(fields[1])
@@ -636,8 +655,17 @@ func (p *fileParser) parseRoom(fields []string) {
 				p.result.Variables = append(p.result.Variables, gameworld.Variable{Name: fields[1]})
 			}
 		case "CALL":
-			// CALL macro — requires loading MACRO definitions from ROOMX.SCR/ROOMY.SCR.
-			// Not yet implemented; left as-is for now.
+			if len(fields) >= 2 {
+				room.Scripts = append(room.Scripts, gameworld.ScriptBlock{
+					Type: "ACTION",
+					Actions: []gameworld.ScriptAction{
+						{
+							Command: "CALL",
+							Args:    fields[1:],
+						},
+					},
+				})
+			}
 		case "CEVENT":
 			// CEVENT <id> <cycles> <room#>
 			if len(fields) >= 4 {
@@ -1119,6 +1147,68 @@ func (p *fileParser) parseMonster(fields []string) {
 	p.result.Monsters = append(p.result.Monsters, mon)
 }
 
+func (p *fileParser) parseMacro(fields []string) {
+	if len(fields) < 2 {
+		p.pos++
+		return
+	}
+
+	num, err := strconv.Atoi(fields[1])
+	if err != nil {
+		p.pos++
+		return
+	}
+
+	macro := gameworld.ScriptMacro{
+		Number:     num,
+		SourceFile: p.filename,
+	}
+
+	p.pos++
+
+	for p.pos < len(p.lines) {
+		line := strings.TrimSpace(p.lines[p.pos])
+
+		if line == "" || strings.HasPrefix(line, ";") {
+			p.pos++
+			continue
+		}
+
+		fields := strings.Fields(line)
+		cmd := strings.ToUpper(fields[0])
+
+		// A new definition ends this macro.
+		// Leave p.pos unchanged so parse() handles it.
+		switch cmd {
+		case "MACRO", "NUMBER", "INUMBER", "MNUMBER",
+			"TRAITDEF", "REGIONDEF", "MLIST",
+			"NOUNDEF", "ADJDEF", "MADJDEF",
+			"MONEYDEF", "FORAGEDEF", "MINEDEF",
+			"BODYPARTDEF", "BODYTYPEDEF", "BREAKMOD":
+			p.result.Macros = append(p.result.Macros, macro)
+			return
+		}
+
+		if strings.HasPrefix(cmd, "IF") {
+			block := p.parseScriptBlock(fields)
+			macro.Scripts = append(macro.Scripts, block)
+			continue
+		}
+
+		// Preserve standalone script actions, including CALL.
+		macro.Scripts = append(macro.Scripts, gameworld.ScriptBlock{
+			Type: "ACTION",
+			Actions: []gameworld.ScriptAction{
+				{Command: cmd, Args: fields[1:]},
+			},
+		})
+
+		p.pos++
+	}
+
+	p.result.Macros = append(p.result.Macros, macro)
+}
+
 // parseItemDescArgs parses the args after "*DESCRIPTION_START ITEM", handling:
 //
 //	EXAM 0, READ 5, IN 3, ON 2, UNDER 1, BEHIND 0  (verb ref)
@@ -1243,6 +1333,20 @@ func (p *fileParser) parseScriptBlock(fields []string) gameworld.ScriptBlock {
 	}
 	p.pos++
 
+	// Top-level definitions terminate a script block if ENDIF is missing.
+	isDefinition := func(cmd string) bool {
+		switch cmd {
+		case "NUMBER", "INUMBER", "MNUMBER", "MACRO",
+			"TRAITDEF", "REGIONDEF", "MLIST",
+			"NOUNDEF", "ADJDEF", "MADJDEF",
+			"MONEYDEF", "FORAGEDEF", "MINEDEF",
+			"BODYPARTDEF", "BODYTYPEDEF", "BREAKMOD",
+			"CEVENT":
+			return true
+		}
+		return false
+	}
+
 	for p.pos < len(p.lines) {
 		line := strings.TrimSpace(p.lines[p.pos])
 		if line == "" || strings.HasPrefix(line, ";") {
@@ -1258,8 +1362,8 @@ func (p *fileParser) parseScriptBlock(fields []string) gameworld.ScriptBlock {
 			return block
 		}
 
-		// Stop at new definition boundaries (handles missing ENDIF in scripts)
-		if cmd == "NUMBER" || cmd == "INUMBER" || cmd == "MNUMBER" {
+		// Leave the definition for the parent parser.
+		if isDefinition(cmd) {
 			return block
 		}
 
@@ -1280,11 +1384,15 @@ func (p *fileParser) parseScriptBlock(fields []string) gameworld.ScriptBlock {
 				efields := strings.Fields(eline)
 				ecmd := strings.ToUpper(efields[0])
 
-				if ecmd == "ENDIF" ||
-					ecmd == "NUMBER" ||
-					ecmd == "INUMBER" ||
-					ecmd == "MNUMBER" {
-					break
+				// ENDIF belongs to this block.
+				if ecmd == "ENDIF" {
+					p.pos++
+					return block
+				}
+
+				// Do not consume a new definition.
+				if isDefinition(ecmd) {
+					return block
 				}
 
 				if ecmd == "ELSE" {
@@ -1292,7 +1400,7 @@ func (p *fileParser) parseScriptBlock(fields []string) gameworld.ScriptBlock {
 					break
 				}
 
-				// Nested conditional inside ELSE
+				// Nested conditional inside ELSE.
 				if strings.HasPrefix(ecmd, "IF") {
 					child := p.parseScriptBlock(efields)
 
@@ -1311,7 +1419,7 @@ func (p *fileParser) parseScriptBlock(fields []string) gameworld.ScriptBlock {
 					continue
 				}
 
-				// Normal action inside ELSE
+				// Normal action inside ELSE.
 				action := gameworld.ScriptAction{
 					Command: ecmd,
 					Args:    efields[1:],
@@ -1340,8 +1448,8 @@ func (p *fileParser) parseScriptBlock(fields []string) gameworld.ScriptBlock {
 		// ------------------------------------------------------------
 		if strings.HasPrefix(cmd, "IF") {
 
-			// If we're in a verb/preverb block and we see another
-			// verb/preverb block, it's a sibling, not a child.
+			// If we're in a verb/preverb block and encounter another
+			// verb/preverb block, treat it as a sibling.
 			isVerbBlock :=
 				cmd == "IFVERB" ||
 					cmd == "IFVERB2" ||
@@ -1363,8 +1471,8 @@ func (p *fileParser) parseScriptBlock(fields []string) gameworld.ScriptBlock {
 					block.Type == "IFLOGIN"
 
 			if isVerbBlock && parentIsVerbBlock {
-				// Implicit ENDIF — return current block,
-				// let parent re-parse this line.
+				// Implicit ENDIF.
+				// Leave this line for the parent parser.
 				return block
 			}
 

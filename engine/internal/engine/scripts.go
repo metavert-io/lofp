@@ -40,6 +40,7 @@ type ScriptContext struct {
 	RoomEvent          bool
 
 	RemoteRoomMsgs []ScriptRoomMessage
+	CarryItem      *InventoryItem // item matched by IFCARRY
 }
 
 type ScriptRoomMessage struct {
@@ -128,6 +129,68 @@ func (e *GameEngine) RunPreverbScripts(
 	if room != nil {
 		for _, block := range room.Scripts {
 
+			// Execute macros called by this room.
+			if block.Type == "ACTION" {
+				for _, action := range block.Actions {
+					if !strings.EqualFold(action.Command, "CALL") ||
+						len(action.Args) == 0 {
+						continue
+					}
+
+					macroNum, err := strconv.Atoi(action.Args[0])
+					if err != nil {
+						continue
+					}
+
+					macro := e.Macros[macroNum]
+					if macro == nil {
+						continue
+					}
+
+					if player.GMTrace {
+						sc.Messages = append(sc.Messages,
+							fmt.Sprintf(
+								"[TRACE] Macro %d: %d blocks, CONCENTRATE=%v",
+								macroNum,
+								len(macro.Scripts),
+								func() bool {
+									for _, b := range macro.Scripts {
+										if scriptTreeContainsEvent(b, "IFPREVERB", verb, refStr) {
+											return true
+										}
+									}
+									return false
+								}(),
+							),
+						)
+					}
+
+					if player.GMTrace && macroNum == 33 {
+						for i, block := range macro.Scripts {
+							sc.Messages = append(sc.Messages,
+								fmt.Sprintf(
+									"[TRACE] Macro 33 block %d: Type=%s Args=%v Children=%d Actions=%d",
+									i,
+									block.Type,
+									block.Args,
+									len(block.Children),
+									len(block.Actions),
+								),
+							)
+						}
+					}
+
+					for _, macroBlock := range macro.Scripts {
+						sc.execEventTree(
+							macroBlock,
+							"IFPREVERB",
+							verb,
+							refStr,
+						)
+					}
+				}
+			}
+
 			// TOUCH-style event.
 			if ri != nil && isTouchVerb(verb) {
 				sc.execEventTree(
@@ -144,6 +207,26 @@ func (e *GameEngine) RunPreverbScripts(
 				"IFPREVERB",
 				verb,
 				refStr,
+			)
+		}
+	}
+
+	if player.GMTrace && def != nil {
+		sc.Messages = append(sc.Messages,
+			fmt.Sprintf(
+				"[TRACE] Item %d: %d script blocks, verb=%s, ref=%s",
+				def.Number, len(def.Scripts), verb, refStr,
+			),
+		)
+
+		for _, block := range def.Scripts {
+			sc.Messages = append(sc.Messages,
+				fmt.Sprintf(
+					"[TRACE] Root=%s Args=%v ContainsPreverb=%v",
+					block.Type,
+					block.Args,
+					scriptTreeContainsEvent(block, "IFPREVERB", verb, refStr),
+				),
 			)
 		}
 	}
@@ -1725,6 +1808,25 @@ func (sc *ScriptContext) evalIfItem(args []string) bool {
 		return false
 	}
 
+	if ref == -1 && sc.ItemRef == nil && sc.CarryItem != nil {
+		if len(args) == 1 {
+			return true
+		}
+
+		switch strings.ToUpper(args[1]) {
+		case "WORN":
+			for i := range sc.Player.Worn {
+				if &sc.Player.Worn[i] == sc.CarryItem {
+					return true
+				}
+			}
+			return false
+
+		case "WIELDED":
+			return sc.Player.Wielded == sc.CarryItem
+		}
+	}
+
 	var ri *gameworld.RoomItem
 
 	if ref == -1 && sc.ItemRef != nil {
@@ -1825,21 +1927,43 @@ func (sc *ScriptContext) getVar(name string) int {
 	}
 	if strings.HasPrefix(name, "ITEMVAL") {
 		idx, err := strconv.Atoi(name[7:])
-		if err != nil || sc.ItemRef == nil {
+		if err != nil {
 			return 0
 		}
-		switch idx {
-		case 1:
-			return sc.ItemRef.Val1
-		case 2:
-			return sc.ItemRef.Val2
-		case 3:
-			return sc.ItemRef.Val3
-		case 4:
-			return sc.ItemRef.Val4
-		case 5:
-			return sc.ItemRef.Val5
+
+		// Prefer the room item when one is active.
+		if sc.ItemRef != nil {
+			switch idx {
+			case 1:
+				return sc.ItemRef.Val1
+			case 2:
+				return sc.ItemRef.Val2
+			case 3:
+				return sc.ItemRef.Val3
+			case 4:
+				return sc.ItemRef.Val4
+			case 5:
+				return sc.ItemRef.Val5
+			}
+			return 0
 		}
+
+		// Otherwise use the item found by IFCARRY.
+		if sc.CarryItem != nil {
+			switch idx {
+			case 1:
+				return sc.CarryItem.Val1
+			case 2:
+				return sc.CarryItem.Val2
+			case 3:
+				return sc.CarryItem.Val3
+			case 4:
+				return sc.CarryItem.Val4
+			case 5:
+				return sc.CarryItem.Val5
+			}
+		}
+
 		return 0
 	}
 	if strings.HasPrefix(name, "ITEMADJ") {
@@ -2203,7 +2327,7 @@ func (sc *ScriptContext) getVar(name string) int {
 		}
 		return 0
 	case "PLAYERNUM":
-		return 0 // TODO: unique player number
+		return sc.Player.IntNums[3] //keeping it like it was in the original code.  intum3=players id.
 	case "WARRANT":
 		return sc.Player.Warrant
 	case "GFLAG1":
@@ -2366,32 +2490,50 @@ func (sc *ScriptContext) resolveNumericArg(arg string) int {
 	return sc.getVar(strings.ToUpper(arg))
 }
 
-// expandScriptText replaces script placeholders in text.
-// evalIfCarry checks if player carries an item with matching archetype (and optional adj).
 func (sc *ScriptContext) evalIfCarry(args []string) bool {
+	sc.CarryItem = nil
+
 	if len(args) < 1 {
 		return false
 	}
+
 	archetype, err := strconv.Atoi(args[0])
 	if err != nil {
 		return false
 	}
+
 	adj := -1
 	if len(args) >= 2 {
 		adj, _ = strconv.Atoi(args[1])
 	}
 
-	if sc.Player.HasItem(archetype, adj) {
-		return true
+	matches := func(ii *InventoryItem) bool {
+		return ii != nil &&
+			ii.Archetype == archetype &&
+			(adj < 0 ||
+				ii.Adj1 == adj ||
+				ii.Adj2 == adj ||
+				ii.Adj3 == adj)
 	}
 
-	/*for _, ii := range sc.Player.Inventory {
-		if ii.Archetype == archetype {
-			if adj < 0 || ii.Adj1 == adj {
-				return true
-			}
+	for i := range sc.Player.Inventory {
+		if matches(&sc.Player.Inventory[i]) {
+			sc.CarryItem = &sc.Player.Inventory[i]
+			return true
 		}
-	}*/
+	}
+
+	for i := range sc.Player.Worn {
+		if matches(&sc.Player.Worn[i]) {
+			sc.CarryItem = &sc.Player.Worn[i]
+			return true
+		}
+	}
+
+	if matches(sc.Player.Wielded) {
+		sc.CarryItem = sc.Player.Wielded
+		return true
+	}
 
 	return false
 }

@@ -71,6 +71,7 @@ func main() {
 		BodyTypeDefs:         result.BodyTypeDefs,
 		StartRoom:            result.StartRoom,
 		BumpRoom:             result.BumpRoom,
+		Macros:               result.Macros,
 	}
 
 	// Connect to MongoDB (optional — game works without it)
@@ -116,6 +117,7 @@ func main() {
 			BreakMods:    r.BreakMods,
 			BodyPartDefs: r.BodyPartDefs,
 			BodyTypeDefs: r.BodyTypeDefs,
+			Macros:       r.Macros,
 		}, nil
 	}
 

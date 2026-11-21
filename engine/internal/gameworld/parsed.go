@@ -24,4 +24,5 @@ type ParsedData struct {
 	BreakMods            []BreakModDef
 	StartRoom            int
 	BumpRoom             int
+	Macros               []ScriptMacro
 }

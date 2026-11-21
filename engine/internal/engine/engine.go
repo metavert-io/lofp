@@ -148,6 +148,7 @@ type GameEngine struct {
 	traits               map[string]*gameworld.TraitDef
 	rooms                map[int]*gameworld.Room
 	monsters             map[int]*gameworld.MonsterDef
+	Macros               map[int]*gameworld.ScriptMacro
 	startRoom            int
 	departRoom           int // safe room for DEPART (bump room)
 	sessions             SessionProvider
@@ -536,6 +537,7 @@ func NewGameEngine(db *mongo.Database, parsed *gameworld.ParsedData) *GameEngine
 		monsters:     make(map[int]*gameworld.MonsterDef),
 		bodyPartDefs: make(map[int]*gameworld.BodyPartDef),
 		bodyTypeDefs: make(map[string]*gameworld.BodyTypeDef),
+		Macros:       make(map[int]*gameworld.ScriptMacro),
 		startRoom:    parsed.StartRoom,
 		departRoom:   parsed.BumpRoom,
 	}
@@ -548,6 +550,10 @@ func NewGameEngine(db *mongo.Database, parsed *gameworld.ParsedData) *GameEngine
 	for i := range parsed.MonsterAdjs {
 		e.monAdjs[parsed.MonsterAdjs[i].ID] = parsed.MonsterAdjs[i].Name
 	}
+	for i := range parsed.Macros {
+		e.Macros[parsed.Macros[i].Number] = &parsed.Macros[i]
+	}
+
 	for i := range parsed.Items {
 		e.items[parsed.Items[i].Number] = &parsed.Items[i]
 	}
@@ -765,8 +771,106 @@ func extractOriginalArgs(input string) string {
 
 const maxInputLength = 500
 
+func (e *GameEngine) ProcessCommand(
+	ctx context.Context,
+	player *Player,
+	input string,
+) *CommandResult {
+
+	// Run the existing command handler unchanged.
+	result := e.executeCommand(ctx, player, input)
+
+	if result == nil {
+		return nil
+	}
+
+	parts := strings.Fields(strings.ToUpper(input))
+	if len(parts) == 0 {
+		return result
+	}
+
+	verb := resolveVerb(parts[0])
+
+	// First test: STATUS only.
+	// Other commands already have script handling,
+	// so don't risk executing their scripts twice.
+	if verb != "STATUS" || len(parts) != 1 {
+		return result
+	}
+
+	room := e.rooms[player.RoomNumber]
+	if room == nil {
+		return result
+	}
+
+	// Original Lexicon script uses STAT, not STATUS.
+	sc := e.RunMacroVerbScripts(player, room, "STAT")
+
+	result.Messages = append(result.Messages, sc.Messages...)
+	result.RoomBroadcast = append(result.RoomBroadcast, sc.RoomMsgs...)
+	result.GMBroadcast = append(result.GMBroadcast, sc.GMMsgs...)
+
+	return result
+}
+
+func (e *GameEngine) RunMacroVerbScripts(
+	player *Player,
+	room *gameworld.Room,
+	verb string,
+) *ScriptContext {
+
+	sc := &ScriptContext{
+		Player:             player,
+		Room:               room,
+		Engine:             e,
+		PlayerEventEnabled: true,
+	}
+
+	if room == nil {
+		return sc
+	}
+
+	verb = strings.ToUpper(verb)
+
+	for _, block := range room.Scripts {
+		if block.Type != "ACTION" {
+			continue
+		}
+
+		for _, action := range block.Actions {
+			if !strings.EqualFold(action.Command, "CALL") ||
+				len(action.Args) == 0 {
+				continue
+			}
+
+			macroNum, err := strconv.Atoi(action.Args[0])
+			if err != nil {
+				continue
+			}
+
+			macro := e.Macros[macroNum]
+			if macro == nil {
+				continue
+			}
+
+			for _, macroBlock := range macro.Scripts {
+				sc.execEventTree(
+					macroBlock,
+					"IFVERB",
+					verb,
+					"-1",
+				)
+			}
+		}
+	}
+
+	sc.flushRemoteRoomMessages()
+
+	return sc
+}
+
 // ProcessCommand parses and executes a player command.
-func (e *GameEngine) ProcessCommand(ctx context.Context, player *Player, input string) *CommandResult {
+func (e *GameEngine) executeCommand(ctx context.Context, player *Player, input string) *CommandResult {
 	input = strings.TrimSpace(input)
 	if input == "" {
 		return &CommandResult{Messages: []string{"What would you like to do?"}}
@@ -858,6 +962,22 @@ func (e *GameEngine) ProcessCommand(ctx context.Context, player *Player, input s
 			"SPECIALIZE CONFIRM",
 		) {
 			player.PendingSpecialization = ""
+		}
+	}
+
+	// Execute room macro preverbs before normal command dispatch.
+	if room := e.rooms[player.RoomNumber]; room != nil {
+		verb := strings.ToUpper(strings.Fields(input)[0])
+
+		macroSC := e.RunMacroPreverbScripts(player, room, verb)
+
+		if macroSC.Blocked {
+			return &CommandResult{
+				Messages:      macroSC.Messages,
+				RoomBroadcast: macroSC.RoomMsgs,
+				GMBroadcast:   macroSC.GMMsgs,
+				PlayerState:   player,
+			}
 		}
 	}
 
@@ -2216,6 +2336,52 @@ func (e *GameEngine) ProcessCommand(ctx context.Context, player *Player, input s
 		}
 		return &CommandResult{Messages: []string{fmt.Sprintf("I don't understand \"%s\". Type HELP for commands.", strings.ToLower(input))}}
 	}
+}
+
+func (e *GameEngine) RunMacroPreverbScripts(player *Player, room *gameworld.Room, verb string) *ScriptContext {
+
+	sc := &ScriptContext{
+		Player:             player,
+		Room:               room,
+		Engine:             e,
+		PlayerEventEnabled: true,
+	}
+
+	if room == nil {
+		return sc
+	}
+
+	verb = strings.ToUpper(verb)
+
+	for _, block := range room.Scripts {
+		if block.Type != "ACTION" {
+			continue
+		}
+
+		for _, action := range block.Actions {
+			if !strings.EqualFold(action.Command, "CALL") ||
+				len(action.Args) == 0 {
+				continue
+			}
+
+			macroNum, err := strconv.Atoi(action.Args[0])
+			if err != nil {
+				continue
+			}
+
+			macro := e.Macros[macroNum]
+			if macro == nil {
+				continue
+			}
+
+			for _, macroBlock := range macro.Scripts {
+				sc.execEventTree(macroBlock, "IFPREVERB", verb, "-1")
+			}
+		}
+	}
+
+	sc.flushRemoteRoomMessages()
+	return sc
 }
 
 func (e *GameEngine) UpdatePlayerTimers(player *Player) []string {
@@ -4040,6 +4206,10 @@ func (e *GameEngine) doLookAt(player *Player, args []string, preverb string) *Co
 		allItems = append(allItems, *player.Wielded)
 	}
 
+	if player.Offhand != nil {
+		allItems = append(allItems, *player.Offhand)
+	}
+
 	for _, ii := range allItems {
 		itemDef := e.items[ii.Archetype]
 		if itemDef == nil {
@@ -4927,6 +5097,29 @@ func (e *GameEngine) examinePlayer(observer *Player, target *Player) *CommandRes
 			}
 		}
 	}
+
+	// Offhand weapon
+	if target.Offhand != nil {
+		oDef := e.items[target.Offhand.Archetype]
+		if oDef != nil {
+			name := e.formatItemName(
+				oDef,
+				target.Offhand.Adj1,
+				target.Offhand.Adj2,
+				target.Offhand.Adj3,
+				target.Offhand.State,
+			)
+
+			if isSelf {
+				msgs = append(msgs,
+					fmt.Sprintf("You are wielding %s in your offhand.", name))
+			} else {
+				msgs = append(msgs,
+					fmt.Sprintf("%s wielding %s in their offhand.", pronoun, name))
+			}
+		}
+	}
+
 	var wornNames []string
 	for _, worn := range target.Worn {
 		wDef := e.items[worn.Archetype]
@@ -6475,7 +6668,7 @@ func (e *GameEngine) doGet(ctx context.Context, player *Player, args []string) *
 
 			return &CommandResult{
 				Messages: []string{
-					fmt.Sprintf("You pick up %d coins.", coins),
+					fmt.Sprintf("You pick up %s.", formatCoinAmount(coins)),
 				},
 				RoomBroadcast: []string{
 					fmt.Sprintf(
@@ -6621,7 +6814,7 @@ func (e *GameEngine) doGet(ctx context.Context, player *Player, args []string) *
 
 			return &CommandResult{
 				Messages: []string{
-					fmt.Sprintf("You pick up %d coins.", coins),
+					fmt.Sprintf("You pick up %s.", formatCoinAmount(coins)),
 				},
 				RoomBroadcast: []string{
 					fmt.Sprintf(
@@ -6776,6 +6969,49 @@ func (e *GameEngine) doGet(ctx context.Context, player *Player, args []string) *
 
 	return &CommandResult{
 		Messages: []string{"You don't see that here."},
+	}
+}
+
+func formatCoinAmount(coins int) string {
+	gold := coins / 100
+	silver := (coins % 100) / 10
+	copper := coins % 10
+
+	var parts []string
+
+	if gold > 0 {
+		if gold == 1 {
+			parts = append(parts, "1 gold crown")
+		} else {
+			parts = append(parts, fmt.Sprintf("%d gold crowns", gold))
+		}
+	}
+
+	if silver > 0 {
+		if silver == 1 {
+			parts = append(parts, "1 silver shilling")
+		} else {
+			parts = append(parts, fmt.Sprintf("%d silver shillings", silver))
+		}
+	}
+
+	if copper > 0 {
+		if copper == 1 {
+			parts = append(parts, "1 copper penny")
+		} else {
+			parts = append(parts, fmt.Sprintf("%d copper pennies", copper))
+		}
+	}
+
+	switch len(parts) {
+	case 0:
+		return "no coins"
+	case 1:
+		return parts[0]
+	case 2:
+		return parts[0] + " and " + parts[1]
+	default:
+		return parts[0] + ", " + parts[1] + ", and " + parts[2]
 	}
 }
 
@@ -8389,8 +8625,8 @@ func (e *GameEngine) doDrop(ctx context.Context, player *Player, args []string) 
 			denom := strings.ToLower(args[1])
 
 			var archetype int
-			var available *int
-			var denomName string
+			//var available *int
+			//var denomName string
 			var adjName string
 			var copperMultiplier int
 
@@ -8398,63 +8634,62 @@ func (e *GameEngine) doDrop(ctx context.Context, player *Player, args []string) 
 
 			case "gold", "crown", "crowns":
 				archetype = 161
-				available = &player.Gold
-				denomName = "gold"
+
 				adjName = "gold"
 				copperMultiplier = 100
 
 			case "silver", "shilling", "shillings":
 				archetype = 162
-				available = &player.Silver
-				denomName = "silver"
+
 				adjName = "silver"
 				copperMultiplier = 10
 
 			case "copper", "penny", "pennies":
 				archetype = 163
-				available = &player.Copper
-				denomName = "copper"
+
 				adjName = "copper"
 				copperMultiplier = 1
 			}
 
 			// Recognized a currency denomination.
-			if available != nil {
+			if copperMultiplier > 0 {
 
-				if *available < amount {
+				// Convert all player currency to copper-equivalent value.
+				totalCopper := player.Gold*100 +
+					player.Silver*10 +
+					player.Copper
+
+				// Calculate the requested amount.
+				copperValue := amount * copperMultiplier
+
+				if totalCopper < copperValue {
 					return &CommandResult{
 						Messages: []string{
-							fmt.Sprintf(
-								"You don't have %d %s coins.",
-								amount,
-								denomName,
-							),
+							"You don't have enough money.",
 						},
 					}
 				}
 
-				// Find the legacy adjective number rather than
-				// hard-coding gold=147, etc.
+				// Find the legacy adjective number.
 				adj := e.adjByName(adjName)
 
-				// Remove the requested denomination from the player.
-				*available -= amount
+				// Deduct the requested value and automatically make change.
+				remaining := totalCopper - copperValue
+
+				player.Gold = remaining / 100
+				player.Silver = (remaining % 100) / 10
+				player.Copper = remaining % 10
 
 				// MONEY room items store their value in copper.
-				copperValue := amount * copperMultiplier
-
 				droppedItem := gameworld.RoomItem{
 					Ref:       len(room.Items),
 					Archetype: archetype,
-					Adj3:      adj, // Adj3 controls the displayed coin type.
+					Adj3:      adj,
 					Val1:      copperValue,
 					State:     "MONEY",
 				}
 
-				room.Items = append(
-					room.Items,
-					droppedItem,
-				)
+				room.Items = append(room.Items, droppedItem)
 
 				e.notifyRoomChange(RoomChange{
 					RoomNumber: player.RoomNumber,
@@ -8463,6 +8698,32 @@ func (e *GameEngine) doDrop(ctx context.Context, player *Player, args []string) 
 				})
 
 				e.SavePlayer(ctx, player)
+
+				// Display the denomination actually dropped.
+				denomText := ""
+
+				switch denom {
+				case "gold", "crown", "crowns":
+					if amount == 1 {
+						denomText = "gold crown"
+					} else {
+						denomText = "gold crowns"
+					}
+
+				case "silver", "shilling", "shillings":
+					if amount == 1 {
+						denomText = "silver shilling"
+					} else {
+						denomText = "silver shillings"
+					}
+
+				case "copper", "penny", "pennies":
+					if amount == 1 {
+						denomText = "copper penny"
+					} else {
+						denomText = "copper pennies"
+					}
+				}
 
 				msgs := []string{}
 
@@ -8481,20 +8742,17 @@ func (e *GameEngine) doDrop(ctx context.Context, player *Player, args []string) 
 
 				msgs = append(
 					msgs,
-					fmt.Sprintf(
-						"You drop %d %s coins.",
-						amount,
-						denomName,
-					),
+					fmt.Sprintf("You drop %d %s.", amount, denomText),
 				)
 
 				return &CommandResult{
 					Messages: msgs,
 					RoomBroadcast: []string{
 						fmt.Sprintf(
-							"%s drops some %s coins.",
+							"%s drops %d %s.",
 							player.FirstName,
-							denomName,
+							amount,
+							denomText,
 						),
 					},
 					PlayerState: player,
@@ -10991,7 +11249,8 @@ func (e *GameEngine) doBreakFree(ctx context.Context, player *Player) *CommandRe
 	}
 
 	// Must actually be restrained.
-	effect, restrained := player.HasStatEffect(RestrainedEffect)
+	_, restrained := player.HasStatEffect(RestrainedEffect)
+
 	if !restrained {
 		return &CommandResult{
 			Messages: []string{
@@ -11002,13 +11261,15 @@ func (e *GameEngine) doBreakFree(ctx context.Context, player *Player) *CommandRe
 
 	// For now, Web is the restraint we know can be escaped
 	// with Combat Maneuvering.
-	if effect.EffectID != 127 {
+	/*  right now any restraint can be broken free from, but we may want to limit it to certain types in the future.
+	if effect.EffectID != 127 && effect.EffectID != 128 {
 		return &CommandResult{
 			Messages: []string{
 				"You cannot break free from this restraint.",
 			},
 		}
 	}
+	*/
 
 	// BREAK FREE always incurs 5 seconds of roundtime.
 	player.RoundTimeExpiry = time.Now().Add(5 * time.Second)
@@ -14778,7 +15039,9 @@ func (e *GameEngine) examineRoomItem(player *Player, room *gameworld.Room, def *
 
 func (e *GameEngine) readRoomItem(room *gameworld.Room, def *gameworld.ItemDef, ri *gameworld.RoomItem) *CommandResult {
 	refStr := fmt.Sprintf("%d", ri.Ref)
+
 	if desc, ok := room.ItemDescriptions["READ:"+refStr]; ok {
+		fmt.Printf("[READ DEBUG] description=%q\n", desc)
 		return &CommandResult{Messages: descriptionToMessages(desc)}
 	}
 	return &CommandResult{Messages: []string{"There is nothing written on it."}}
@@ -14811,10 +15074,10 @@ func joinList(items []string) string {
 }
 
 func descriptionToMessages(desc string) []string {
-	if strings.Contains(desc, "\n") {
-		return strings.Split(desc, "\n")
-	}
-	return []string{desc}
+	desc = strings.ReplaceAll(desc, "\r\n", "\n")
+	desc = strings.ReplaceAll(desc, "\r", "\n")
+
+	return strings.Split(desc, "\n")
 }
 
 func (e *GameEngine) formatItemLook(def *gameworld.ItemDef, ri *gameworld.RoomItem) []string {

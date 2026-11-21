@@ -2046,7 +2046,7 @@ func (e *GameEngine) doEditItem(ctx context.Context, player *Player, args []stri
 	if len(args) == 0 {
 		return &CommandResult{
 			Messages: []string{
-				"Usage: @EDITEM <item> [VAL1|VAL2|VAL3|VAL4|VAL5 <value>]",
+				"Usage: @EDITEM <item> [ADJ1|ADJ2|ADJ3|VAL1|VAL2|VAL3|VAL4|VAL5 <value>]",
 			},
 		}
 	}
@@ -2063,7 +2063,9 @@ func (e *GameEngine) doEditItem(ctx context.Context, player *Player, args []stri
 		field := strings.ToUpper(args[len(args)-2])
 
 		switch field {
-		case "VAL1", "VAL2", "VAL3", "VAL4", "VAL5":
+		case "ADJ1", "ADJ2", "ADJ3",
+			"VAL1", "VAL2", "VAL3", "VAL4", "VAL5":
+
 			value, err := strconv.Atoi(args[len(args)-1])
 			if err != nil {
 				return &CommandResult{
@@ -2104,6 +2106,12 @@ func (e *GameEngine) doEditItem(ctx context.Context, player *Player, args []stri
 
 		if editField != "" {
 			switch editField {
+			case "ADJ1":
+				ii.Adj1 = editValue
+			case "ADJ2":
+				ii.Adj2 = editValue
+			case "ADJ3":
+				ii.Adj3 = editValue
 			case "VAL1":
 				ii.Val1 = editValue
 			case "VAL2":

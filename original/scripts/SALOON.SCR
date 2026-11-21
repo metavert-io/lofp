@@ -305,6 +305,7 @@ Amazingly enough, the sign is covered with writing.
 *DESCRIPTION_START ITEM READ 2
 .                      .
 .         Rules of the Game:             .
+
 . Drop your money (in gold only, please) and point to it in order      .
 . to place your bet. Then, get the dice and roll them down the table.  .
 . A first roll of 2, 3, or 12 is an automatic loss. A first roll of 7  .
@@ -361,9 +362,11 @@ IFPREVERB POINT -1
       IFVAR DANBET ! 0
 				ECHO PLAYER Someone else has already placed a bet.
       ELSE
-				STRCVT 0 ITEMVAL1
-				ECHO PLAYER You place your bet for %0 gold.
-				ECHO OTHERS %N bets %0 gold coins at the craps table.
+				EQUAL DUMMY4 ITEMVAL1
+				DIV DUMMY4 100
+				STRCVT 0 DUMMY4
+				ECHO PLAYER You place your bet for %0 gold crowns.
+				ECHO OTHERS %N bets %0 gold crowns at the craps table.
 				EQUAL DANBET ITEMVAL1
 				REMOVEITEM -1
 				EQUAL FLAG2 205

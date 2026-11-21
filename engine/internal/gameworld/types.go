@@ -19,6 +19,12 @@ type Room struct {
 	SourceFile       string            `bson:"sourceFile" json:"sourceFile"`
 }
 
+type ScriptMacro struct {
+	Number     int           `bson:"number" json:"number"`
+	Scripts    []ScriptBlock `bson:"scripts" json:"scripts"`
+	SourceFile string        `bson:"sourceFile" json:"sourceFile"`
+}
+
 // RoomItem is an item placed in a room via ITEM or PUT commands.
 type RoomItem struct {
 	Ref        int      `bson:"ref" json:"ref"`             // reference number 0-9

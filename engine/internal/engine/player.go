@@ -502,23 +502,31 @@ func (p *Player) RemoveActiveStatEffect(effectID int, source EffectSource) bool 
 }
 
 func (p *Player) HasItem(archetype int, adj int) bool {
+	matches := func(ii *InventoryItem) bool {
+		if ii == nil || ii.Archetype != archetype {
+			return false
+		}
+
+		return adj < 0 ||
+			ii.Adj1 == adj ||
+			ii.Adj2 == adj ||
+			ii.Adj3 == adj
+	}
+
 	for _, ii := range p.Inventory {
-		if ii.Archetype == archetype && (adj < 0 || ii.Adj1 == adj) {
+		if matches(&ii) {
 			return true
 		}
 	}
 
 	for _, ii := range p.Worn {
-		if ii.Archetype == archetype && (adj < 0 || ii.Adj1 == adj) {
+		if matches(&ii) {
 			return true
 		}
 	}
 
-	if p.Wielded != nil {
-		if p.Wielded.Archetype == archetype &&
-			(adj < 0 || p.Wielded.Adj1 == adj) {
-			return true
-		}
+	if matches(p.Wielded) {
+		return true
 	}
 
 	return false
