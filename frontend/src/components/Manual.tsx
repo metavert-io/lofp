@@ -1364,6 +1364,7 @@ Obvious exits: north, south, east.
               <CommandEntry cmd="RECALL" desc="Use sagecraft for additional area/object knowledge." />
               <CommandEntry cmd="REMOVE <object>" desc="Take off something you are wearing." />
               <CommandEntry cmd="REPAIR <item>" desc="Fix damaged items. Weaponsmithing needed for weapons." />
+              <CommandEntry cmd="REROLL STATS" desc="Reroll your character's stats while still level 1." />
               <CommandEntry cmd="RETREAT" desc="Back off from melee engagement." />
               <CommandEntry cmd="SEARCH <corpse>" desc="Remove items from a corpse." />
               <CommandEntry cmd="SELFTRAIN <skill#>" desc="Train yourself at +1 build point cost." />
@@ -1371,7 +1372,7 @@ Obvious exits: north, south, east.
               <CommandEntry cmd="SKIN <corpse>" desc="Eviscerate for specimens. Requires Woodlore or Sagecraft." />
               <CommandEntry cmd="SMELT <ore>" desc="Extract metal from raw ore. Requires Weaponsmith." />
               <CommandEntry cmd="SNEAK <direction>" desc="Move while staying hidden." />
-              <CommandEntry cmd="SPECIALIZE <weapon>" desc="Increase chance to hit vital areas with a specific weapon." />
+              <CommandEntry cmd="SPECIALIZE [wielded weapon] " desc="Increase chance to hit vital areas with a specific weapon.  Wield the weapon first." />
               <CommandEntry cmd="SPELL" desc="View all spells you know." />
               <CommandEntry cmd="SPLIT <amount> <coin type>" desc="Divide coins between party members." />
               <CommandEntry cmd="STALK <target>" desc="Secretly track someone." />
